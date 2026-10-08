@@ -62,3 +62,14 @@ def test_run_reports_errors_without_traceback(monkeypatch, capsys, tmp_path, nam
         _run(monkeypatch, tmp_path / name)
     assert exc.value.code == 2
     assert message in capsys.readouterr().err
+
+
+def test_run_reports_tokenizer_failure_not_missing_file(monkeypatch, capsys, tmp_path):
+    path = tmp_path / "long.txt"
+    path.write_text("가나다라마바사 " * 30, encoding="utf-8")
+    monkeypatch.setenv("PREPROCESS_TOKENIZER", str(tmp_path / "없는토크나이저.json"))
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, path)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "토크나이저" in err and "파일이 없습니다" not in err

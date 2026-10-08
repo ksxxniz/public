@@ -8,13 +8,17 @@ import argparse
 from pathlib import Path
 
 from preprocess.chunk import split_document
-from preprocess.load import UnsupportedDocumentError, read_document
+from preprocess.load import LoadedDocument, UnsupportedDocumentError, read_document
 from preprocess.normalize import VERSION
+from preprocess.tokens import TokenizerLoadError
 
 
 def run(path: str | Path) -> None:
+    report(path, read_document(path))
+
+
+def report(path: str | Path, doc: LoadedDocument) -> None:
     doc_id = Path(path).stem
-    doc = read_document(path)
     chunks = split_document(doc_id, doc.raw, fmt=doc.fmt)
     print(f"[preprocess v{VERSION}] {doc_id} ({doc.fmt}, {doc.encoding}): {len(chunks)}개 청크")
     for c in chunks:
@@ -26,13 +30,17 @@ def main() -> None:
     parser.add_argument("--file", required=True, help="검사할 문서 경로")
     args = parser.parse_args()
     try:
-        run(args.file)
+        doc = read_document(args.file)
     except UnsupportedDocumentError as e:
         parser.exit(2, f"오류: {e}\n")
     except FileNotFoundError:
         parser.exit(2, f"오류: 파일이 없습니다: {args.file}\n")
     except OSError as e:  # 폴더를 넘겼거나 권한이 없는 경우 등
         parser.exit(2, f"오류: 파일을 읽을 수 없습니다: {args.file} ({e.strerror or e})\n")
+    try:
+        report(args.file, doc)
+    except TokenizerLoadError as e:
+        parser.exit(2, f"오류: {e}\n")
 
 
 if __name__ == "__main__":

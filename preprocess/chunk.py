@@ -3,29 +3,29 @@
 순서: 문서 전체를 먼저 정규화(normalize_document) → 정리본 기준으로 자르기 → 각 청크의
 원문 구간은 위치 대응표로 역산한다. 원문을 먼저 자르면 인코딩이 청크 경계에서 잘리고,
 숨김 HTML 판정이 깨지고, 토큰 수 기준이 어긋나고, 조각별 NFKC 결과가 전체와 달라진다.
-
-TODO(2~3주차): text_windows() 를 3단계 모델 토크나이저 기준 384/50 토큰 슬라이딩
-윈도우로 바꾼다. 지금은 문서 전체를 청크 1개로 만든다.
 """
 
+from bisect import bisect_left
 from collections import Counter
 from collections.abc import Sequence
 
 from common.schema import Chunk, DecodedSegment, Span, TransformLog, TransformSpan
+from preprocess.context import Event
 from preprocess.normalize import NormalizedDoc, normalize_document
+from preprocess.tokens import Tokenizer, token_windows
 
 
-def split_document(doc_id: str, raw: str, fmt: str | None = None) -> list[Chunk]:
+def split_document(
+    doc_id: str, raw: str, fmt: str | None = None, tokenizer: Tokenizer | None = None
+) -> list[Chunk]:
     """문서 하나를 Chunk 목록으로 자른다. fmt 가 None 이면 내용으로 판별한다."""
-    return chunks_from_document(doc_id, normalize_document(raw, fmt))
+    doc = normalize_document(raw, fmt)
+    return chunks_from_document(doc_id, doc, windows=text_windows(doc.text, tokenizer))
 
 
-def text_windows(text: str) -> list[tuple[int, int]]:
-    """정리본을 자를 구간 [start, end) 목록.
-
-    TODO(2~3주차): 토크나이저 기준 384/50 토큰으로 자르고, 경계는 문장 끝을 우선한다.
-    """
-    return [(0, len(text))] if text else []
+def text_windows(text: str, tokenizer: Tokenizer | None = None) -> list[tuple[int, int]]:
+    """정리본을 자를 구간 [start, end) 목록."""
+    return token_windows(text, tokenizer)
 
 
 def chunks_from_document(
@@ -37,7 +37,9 @@ def chunks_from_document(
         # 정리본이 비어도(전부 보이지 않는 문자였던 문서 등) 청크 1개는 반드시 만든다.
         # 청크가 0개면 파이프라인이 판정 없이 통과시키고, 변환 기록이라는 증거도 사라진다.
         windows = [(0, 0)]
-    return [_make_chunk(doc_id, doc, k, s, e) for k, (s, e) in enumerate(windows)]
+    events = sorted(doc.events, key=lambda ev: (ev.start, ev.end))
+    starts = [ev.start for ev in events]
+    return [_make_chunk(doc_id, doc, k, s, e, events, starts) for k, (s, e) in enumerate(windows)]
 
 
 def raw_bounds(doc: NormalizedDoc, start: int, end: int) -> tuple[int, int]:
@@ -60,8 +62,17 @@ def raw_bounds(doc: NormalizedDoc, start: int, end: int) -> tuple[int, int]:
     return r0, r1
 
 
-def _make_chunk(doc_id: str, doc: NormalizedDoc, k: int, start: int, end: int) -> Chunk:
+def _make_chunk(
+    doc_id: str,
+    doc: NormalizedDoc,
+    k: int,
+    start: int,
+    end: int,
+    events: list[Event],
+    starts: list[int],
+) -> Chunk:
     r0, r1 = raw_bounds(doc, start, end)
+    inside = events[bisect_left(starts, r0) : bisect_left(starts, r1)]
     segments = _segments_in(doc, r0, r1)
     return Chunk(
         chunk_id=f"{doc_id}-c{k}",
@@ -71,8 +82,8 @@ def _make_chunk(doc_id: str, doc: NormalizedDoc, k: int, start: int, end: int) -
         span=Span(start=r0, end=r1),
         offset_map=[s - r0 for s in doc.starts[start:end]],
         decoded_segments=segments,
-        transform_log=_log_in(doc, r0, r1, n_decoded=len(segments)),
-        transform_spans=_spans_in(doc, r0, r1),
+        transform_log=_log_in(inside, n_decoded=len(segments)),
+        transform_spans=_spans_in(inside, r0, r1),
         meta={
             "normalize_version": doc.version,
             "unicode_version": doc.unicode_version,
@@ -92,27 +103,25 @@ def _segments_in(doc: NormalizedDoc, r0: int, r1: int) -> list[DecodedSegment]:
     return out
 
 
-def _log_in(doc: NormalizedDoc, r0: int, r1: int, n_decoded: int) -> TransformLog:
+def _log_in(events: list[Event], n_decoded: int) -> TransformLog:
     """청크 원문 구간 안에서 시작한 변환만 센다.
 
     decoded_count 는 이 청크에 들어간 복원 결과(decoded_segments) 개수로 채운다.
     복원 방법과 상관없이 세므로 개수와 목록이 어긋나지 않는다.
     """
-    counts = Counter(ev.kind for ev in doc.events if r0 <= ev.start < r1)
+    counts = Counter(ev.kind for ev in events)
     counts["decoded_count"] = n_decoded
     return TransformLog(**counts)
 
 
-def _spans_in(doc: NormalizedDoc, r0: int, r1: int) -> list[TransformSpan]:
+def _spans_in(events: list[Event], r0: int, r1: int) -> list[TransformSpan]:
     """청크 원문 구간 안에서 시작한 변환의 위치를 청크 기준으로 돌려준다.
 
     같은 종류의 변환이 바로 붙어 있으면 (제로폭 문자 5개 연속 등) 한 구간으로 합친다.
     개수는 TransformLog 에 따로 있으니 위치 목록은 짧게 유지한다.
     """
     out: list[TransformSpan] = []
-    for ev in sorted(doc.events, key=lambda e: (e.start, e.end)):
-        if not r0 <= ev.start < r1:
-            continue
+    for ev in events:
         s, e = ev.start - r0, min(ev.end, r1) - r0
         last = out[-1] if out else None
         if last and last.kind == ev.kind and last.note == ev.note and last.span.end == s:

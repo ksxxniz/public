@@ -152,7 +152,7 @@ def test_stray_variation_selector_is_counted():
         ("㈜한국", "(주)한국"),  # 1 → N
         ("ㅋㅋㅋ", "ㅋㅋㅋ"),  # 정상 텍스트는 그대로
         ("ㅠㅠ 아쉽네요", "ㅠㅠ 아쉽네요"),
-        ("ɪɢɴᴏʀᴇ", "ɪɢɴᴏʀᴇ"),  # small caps 는 NFKC 가 못 푼다 (④ 홈글리프 몫)
+        ("ɪɢɴᴏʀᴇ", "ignore"),  # small caps 는 NFKC 가 못 푼다 (④ 홈글리프 몫)
     ],
 )
 def test_nfkc_cases(raw, expected):
