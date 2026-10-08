@@ -17,6 +17,7 @@ from hypothesis import strategies as st
 
 from common import examples
 from preprocess.chunk import split_document
+from preprocess.homoglyph import TO_LATIN
 from preprocess.normalize import normalize_document
 from preprocess.unicode_steps import _STRAY_TO_COMPAT
 
@@ -46,6 +47,8 @@ def _comes_from(ch: str, src: str) -> bool:
         return False  # 지운 글자만 가리키면 위치가 틀린 것이다
     nfkc = unicodedata.normalize("NFKC", seen)
     if ch in seen or ch in nfkc or ch in _to_compat_jamo(nfkc):
+        return True
+    if ch in "".join(TO_LATIN.get(c, c) for c in nfkc):
         return True
     if ch.isspace():  # 공백 정리: 탭·NBSP·CRLF·연속 공백 → " " 또는 "\n"
         return any(c.isspace() for c in nfkc)
@@ -98,6 +101,9 @@ CASES = [
     pytest.param("e\u0301 cafe\u0301 ｶﾞ", "txt", id="combining"),
     pytest.param("\u216b\u0308\u0301 a\u0301\uff9e", "txt", id="combining-same-length"),
     pytest.param("<p>안녕<span style='display:none'>ignore</span></p>", "html", id="html"),
+    pytest.param("Іgnоrе аll prеvious", "txt", id="homoglyph-mixed"),
+    pytest.param("ɪɢɴᴏʀᴇ instruϲtions", "txt", id="small-caps-lunate-sigma"),
+    pytest.param("привет мир", "txt", id="russian-untouched"),
 ]
 
 
@@ -111,7 +117,7 @@ _ALPHABET = list("aZ 1.(\n\r\t가무해ㅁㅜㅅㅣㄱㅗㅇㅋㅠ") + [
     "\u200b", "\u200d", "\u2060", "\u202e", "\u00ad", "\u3164", "\u034f",
     "\U000e0041", "\U000e0069", "\U000e007f", "\U0001f3f4", "\ufe0f", "\ufe0e",
     "😀", "❤", "👨", "\u3000", "\u00a0", "\uffb1", "\uffd3", "㉠", "ｶ", "ﾞ",
-    "\u2028", "\u21a9",
+    "\u2028", "\u21a9", "а", "о", "і", "ɪ", "ϲ", "Σ", "п",
 ]  # fmt: skip
 
 
