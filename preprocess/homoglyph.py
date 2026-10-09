@@ -70,7 +70,8 @@ CONFUSABLE: dict[str, str] = _add_nfkc_forms(VISUAL_CONFUSABLE)
 TO_LATIN: dict[str, str] = {**CONFUSABLE, **SUPPLEMENT}
 
 _CANDIDATE = re.compile("[" + "".join(re.escape(c) for c in TO_LATIN) + "]")
-_WORD = re.compile(r"[^\W\d_]+")
+_MARKS = "".join(chr(cp) for cp in range(0x300, 0x20000) if unicodedata.category(chr(cp))[0] == "M")
+_WORD = re.compile(r"(?:[^\W\d_]|[" + _MARKS + "])+")
 
 
 def _is_latin(ch: str) -> bool:
@@ -90,6 +91,13 @@ def replace_homoglyphs(ctx: Context) -> None:
         for k, ch in enumerate(word):
             if ch in SUPPLEMENT or (mixed and ch in CONFUSABLE):
                 pos = m.start() + k
-                edits.append(Edit(pos, pos + 1, TO_LATIN[ch]))
+                end = pos + 1
+                while end < len(text) and unicodedata.combining(text[end]):
+                    end += 1
+                new = unicodedata.normalize("NFKC", TO_LATIN[ch] + text[pos + 1 : end])
+                if len(new) == end - pos and new[1:] == text[pos + 1 : end]:
+                    edits.append(Edit(pos, pos + 1, TO_LATIN[ch]))
+                else:
+                    edits.append(Edit(pos, end, new, block=True))
     if edits:
         ctx.record("homoglyph_replaced", ctx.tt.apply(edits))

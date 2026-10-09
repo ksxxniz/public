@@ -93,14 +93,26 @@ def _make_chunk(
 
 
 def _segments_in(doc: NormalizedDoc, r0: int, r1: int) -> list[DecodedSegment]:
-    """청크 원문 구간과 겹치는 복원 결과를 청크 기준 위치로 바꿔서 돌려준다."""
+    """청크 원문 구간과 겹치는 복원 결과를 청크 기준 위치로 바꿔서 돌려준다.
+
+    태그 문자 복원 결과가 2개 이상이면 순서대로 이어 붙인 결과를 하나 더 넣는다.
+    """
     out = []
     for seg in doc.decoded_segments:
         s, e = seg.span.start, seg.span.end
         if s < r1 and e > r0:
             span = Span(start=max(s, r0) - r0, end=min(e, r1) - r0)
             out.append(seg.model_copy(update={"span": span}))
-    return out
+    return with_joined_tags(out)
+
+
+def with_joined_tags(segments: list[DecodedSegment]) -> list[DecodedSegment]:
+    tags = [seg for seg in segments if seg.method == "unicode_tag"]
+    if len(tags) < 2:
+        return segments
+    span = Span(start=tags[0].span.start, end=tags[-1].span.end)
+    joined = "".join(seg.decoded for seg in tags)
+    return [*segments, DecodedSegment(method="unicode_tag", span=span, decoded=joined)]
 
 
 def _log_in(events: list[Event], n_decoded: int) -> TransformLog:

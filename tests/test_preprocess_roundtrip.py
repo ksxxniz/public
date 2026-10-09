@@ -21,17 +21,22 @@ from preprocess.homoglyph import TO_LATIN
 from preprocess.normalize import normalize_document
 from preprocess.unicode_steps import _STRAY_TO_COMPAT
 
-_INVISIBLE_EXTRA = frozenset("\u034f\u115f\u1160\u3164\uffa0")
+_INVISIBLE_EXTRA = frozenset(
+    "\u034f\u115f\u1160\u3164\uffa0\u17b4\u17b5\u2065\u2800\U0001d159\u180b\u180c\u180d\u180f"
+)
 
 
 def _is_invisible(c: str) -> bool:
-    """정규화가 지우는 글자: 형식 문자(제로폭·양방향·태그 등), 한글 채움 문자, 변형 선택자."""
+    """정규화가 지우는 글자: 형식 문자(제로폭·양방향·태그 등), 한글 채움 문자, 변형 선택자,
+    공백류가 아닌 제어 문자, 점자 공백 등."""
     cp = ord(c)
     return (
         unicodedata.category(c) == "Cf"
+        or (unicodedata.category(c) == "Cc" and not c.isspace())
         or c in _INVISIBLE_EXTRA
         or 0xFE00 <= cp <= 0xFE0F
-        or 0xE0100 <= cp <= 0xE01EF
+        or 0xFFF0 <= cp <= 0xFFF8
+        or 0xE0080 <= cp <= 0xE0FFF
     )
 
 
@@ -48,7 +53,8 @@ def _comes_from(ch: str, src: str) -> bool:
     nfkc = unicodedata.normalize("NFKC", seen)
     if ch in seen or ch in nfkc or ch in _to_compat_jamo(nfkc):
         return True
-    if ch in "".join(TO_LATIN.get(c, c) for c in nfkc):
+    latin = "".join(TO_LATIN.get(c, c) for c in nfkc)
+    if ch in latin or ch in unicodedata.normalize("NFKC", latin):
         return True
     if ch.isspace():  # 공백 정리: 탭·NBSP·CRLF·연속 공백 → " " 또는 "\n"
         return any(c.isspace() for c in nfkc)
@@ -104,6 +110,14 @@ CASES = [
     pytest.param("Іgnоrе аll prеvious", "txt", id="homoglyph-mixed"),
     pytest.param("ɪɢɴᴏʀᴇ instruϲtions", "txt", id="small-caps-lunate-sigma"),
     pytest.param("привет мир", "txt", id="russian-untouched"),
+    pytest.param("ig\x00no\x08re \x1b[31m빨강\x7f \u2800끝", "txt", id="control-chars"),
+    pytest.param("\u1112\u119e\u11ab글 \u1106\u315c\u1109\u3163", "txt", id="old-hangul"),
+    pytest.param(
+        "".join(v + _tags(h) for v, h in zip("연차휴가규정", "ignore", strict=True)),
+        "txt",
+        id="interleaved-tags",
+    ),
+    pytest.param("\ufb01\u0301x \u25fb\ufe0f \u180bx", "txt", id="ligature-emoji-fvs"),
 ]
 
 
@@ -118,6 +132,8 @@ _ALPHABET = list("aZ 1.(\n\r\t가무해ㅁㅜㅅㅣㄱㅗㅇㅋㅠ") + [
     "\U000e0041", "\U000e0069", "\U000e007f", "\U0001f3f4", "\ufe0f", "\ufe0e",
     "😀", "❤", "👨", "\u3000", "\u00a0", "\uffb1", "\uffd3", "㉠", "ｶ", "ﾞ",
     "\u2028", "\u21a9", "а", "о", "і", "ɪ", "ϲ", "Σ", "п",
+    "\x00", "\x1b", "\x7f", "\x1f", "\x0b", "\x85", "\u2800", "\u180b", "\u17b4",
+    "\u119e", "\u1112", "\u11ab", "\U000e0080", "\ufb01", "\u25fb",
 ]  # fmt: skip
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from common import config
 from datagen.evasion import CONCEALMENT, DEMO_SAMPLES, TECHNIQUES, _read_jsonl, generate
+from preprocess.chunk import with_joined_tags
 from preprocess.normalize import normalize_document, normalize_text
 
 SIGNALS = (
@@ -34,13 +35,14 @@ def revealed(record: dict) -> bool:
         )
     if target in doc.text:
         return True
-    return any(target in normalize_text(seg.decoded) for seg in doc.decoded_segments)
+    segments = with_joined_tags(doc.decoded_segments)
+    return any(target in normalize_text(seg.decoded) for seg in segments)
 
 
 def signals(record: dict) -> Counter:
     doc = normalize_document(record["text"], record.get("fmt", "txt"))
     counts = Counter(ev.kind for ev in doc.events)
-    counts["decoded_count"] = len(doc.decoded_segments)
+    counts["decoded_count"] = len(with_joined_tags(doc.decoded_segments))
     return counts
 
 
