@@ -82,6 +82,9 @@ def decode_bytes(data: bytes) -> tuple[str, str, bool]:
     try:
         text = data.decode("cp949")
         if _looks_korean(text):
+            japanese = _as_japanese(data, text)
+            if japanese is not None:
+                return japanese, "cp932", False
             return text, "cp949", False
     except UnicodeDecodeError:
         pass
@@ -100,3 +103,23 @@ def _looks_korean(text: str) -> bool:
         return True
     hangul = sum(1 for c in non_ascii if "\uac00" <= c <= "\ud7a3" or "\u3131" <= c <= "\u318e")
     return hangul / len(non_ascii) >= 0.6
+
+
+_COMMON_HANGUL = frozenset(
+    bytes((lead, trail)).decode("cp949")
+    for lead in range(0xB0, 0xC9)
+    for trail in range(0xA1, 0xFF)
+)
+
+
+def _as_japanese(data: bytes, korean: str) -> str | None:
+    syllables = [c for c in korean if "\uac00" <= c <= "\ud7a3"]
+    if 2 * sum(1 for c in syllables if c in _COMMON_HANGUL) >= len(syllables):
+        return None
+    try:
+        text = data.decode("cp932")
+    except UnicodeDecodeError:
+        return None
+    non_ascii = [c for c in text if ord(c) >= 0x80]
+    hiragana = sum(1 for c in non_ascii if "\u3041" <= c <= "\u3096")
+    return text if non_ascii and hiragana / len(non_ascii) >= 0.2 else None

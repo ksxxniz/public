@@ -10,17 +10,19 @@
 - 정리본(text) 에서 찾은 위치는 반드시 Chunk.raw_span() 으로 원문 위치로 바꿔서 내보낸다.
 - raw_span() 의 끝은 '다음 글자의 원문 시작 위치'까지 잡는다. 여러 글자가 한 글자로
   합쳐진 경우(NFD 자모 → 음절)에도 원문을 빠짐없이 덮기 위해서다. 대신 구간 바로 뒤에서
-  지워진 글자(제로폭 등)도 함께 포함된다.
+  지워진 글자(제로폭 등)도 함께 포함된다. 원문 시작 위치가 같은 다음 글자들(한 원문
+  묶음에서 함께 나온 글자, 예: ﬁ́ → fí)은 건너뛰고 위치가 바뀌는 글자까지 잡는다.
 - offset_map 은 감소하지 않는다. 전처리는 글자 순서를 바꾸지 않는다.
 - 위치 단위는 파이썬 코드포인트다. 웹(JS)은 UTF-16 단위라서 이모지·태그 문자처럼
   U+FFFF 를 넘는 글자가 2칸이 된다. web 에서 바꿔 쓴다.
 """
 
+from bisect import bisect_right
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "0.2.2"
+SCHEMA_VERSION = "0.2.3"
 
 Label = Literal["benign", "injection"]
 Stage = Literal["preprocess", "rule", "stage1", "stage2"]
@@ -59,7 +61,8 @@ class TransformLog(_Model):
     이 숫자 자체가 1차 분류기·룰 필터의 단서가 된다. 청크마다 길이가 다르므로
     비교할 때는 raw_text 길이로 나눈 비율(예: 1000자당 개수)로 쓴다"""
 
-    zero_width_removed: int = Field(default=0, ge=0)  # 제로폭 문자 (이모지 안 ZWJ·맨 앞 BOM 제외)
+    # 제로폭 문자 등 보이지 않는 글자와 제어 문자 (이모지 안 ZWJ·맨 앞 BOM 제외)
+    zero_width_removed: int = Field(default=0, ge=0)
     emoji_zwj: int = Field(default=0, ge=0)  # 이모지 조합 안의 ZWJ. 정상 신호라 따로 센다
     hangul_filler_removed: int = Field(default=0, ge=0)  # U+3164 등. Cf 가 아니라 따로 센다
     variation_selector_removed: int = Field(default=0, ge=0)
@@ -130,8 +133,10 @@ class Chunk(_Model):
         예전 계산(offset_map[end - 1] + 1)은 NFD 자모가 합쳐진 글자에서 끝을 잘랐다."""
         if not 0 <= start < end <= len(self.text):
             raise ValueError(f"text 범위를 벗어난 구간입니다: [{start}, {end})")
-        nxt = self.offset_map[end] if end < len(self.text) else len(self.raw_text)
-        return Span(start=self.offset_map[start], end=max(self.offset_map[end - 1] + 1, nxt))
+        last = self.offset_map[end - 1]
+        k = bisect_right(self.offset_map, last, end)
+        nxt = self.offset_map[k] if k < len(self.offset_map) else len(self.raw_text)
+        return Span(start=self.offset_map[start], end=max(last + 1, nxt))
 
 
 class StageResult(_Model):

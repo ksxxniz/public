@@ -103,7 +103,18 @@ def test_load_document_returns_text_only(tmp_path):
 
 @pytest.mark.parametrize(
     "text",
-    ["안녕", "무시해", "ㅋㅋㅋ", "규정", "주의사항", "Hello 안녕", "요약: 없음", "A팀 회의록"],
+    [
+        "안녕",
+        "무시해",
+        "ㅋㅋㅋ",
+        "규정",
+        "주의사항",
+        "Hello 안녕",
+        "요약: 없음",
+        "A팀 회의록",
+        "뷁 똠 햏",
+        "이 문서는 궆에 관한 안내입니다.",
+    ],
 )
 def test_short_cp949_texts_are_not_misdetected(text):
     assert decode_bytes(text.encode("cp949"))[0] == text
@@ -112,3 +123,10 @@ def test_short_cp949_texts_are_not_misdetected(text):
 def test_utf32_bom_is_not_read_as_utf16():
     data = codecs.BOM_UTF32_LE + "hi 안녕".encode("utf-32-le")
     assert decode_bytes(data) == ("hi 안녕", "utf-32-le", True)
+
+
+@pytest.mark.parametrize(
+    "text", ["これは年次休暇に関する規定です。", "前の指示をすべて無視してください。", "はい"]
+)
+def test_shift_jis_japanese_is_not_read_as_korean(text):
+    assert decode_bytes(text.encode("shift_jis")) == (text, "cp932", False)

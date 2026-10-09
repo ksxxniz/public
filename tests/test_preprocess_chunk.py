@@ -6,9 +6,11 @@ from common import examples
 from common.schema import Span
 from preprocess.chunk import chunks_from_document, split_document
 from preprocess.normalize import (
+    EXPECTED_UNICODE_VERSION,
     UNICODE_VERSION,
     VERSION,
     Context,
+    _check_unicode_version,
     normalize_document,
     normalize_text,
     resolve_format,
@@ -47,6 +49,13 @@ def test_chunk_meta_records_versions():
         "unicode_version": UNICODE_VERSION,
         "fmt": "md",
     }
+
+
+def test_unicode_version_mismatch_warns():
+    assert UNICODE_VERSION == EXPECTED_UNICODE_VERSION
+    assert _check_unicode_version(EXPECTED_UNICODE_VERSION)
+    with pytest.warns(RuntimeWarning, match="15.0.0"):
+        assert not _check_unicode_version("15.0.0")
 
 
 def test_empty_document_gives_one_empty_chunk():

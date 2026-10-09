@@ -2,7 +2,7 @@ import pytest
 
 from preprocess.chunk import split_document
 from preprocess.homoglyph import CONFUSABLE, SUPPLEMENT, TO_LATIN
-from preprocess.normalize import normalize_text
+from preprocess.normalize import normalize_document, normalize_text
 
 
 @pytest.mark.parametrize(
@@ -50,3 +50,15 @@ def test_table_maps_to_single_ascii_letters():
 def test_homoglyph_is_idempotent(raw):
     once = normalize_text(raw)
     assert normalize_text(once) == once
+
+
+def test_accent_after_homoglyph_is_composed():
+    doc = normalize_document("\u0406gn\u043er\u0435\u0301", "txt")
+    assert doc.text == "Ignor\u00e9"
+    assert (doc.starts[-1], doc.ends[-1]) == (5, 7)
+    assert sum(ev.kind == "homoglyph_replaced" for ev in doc.events) == 3
+
+
+@pytest.mark.parametrize("mark", ["\u0310", "\u0901", "\u0e4d", "\u20dd"])
+def test_mark_inside_word_does_not_hide_homoglyphs(mark):
+    assert normalize_text(f"\u0440\u0430{mark}ssword") == f"pa{mark}ssword"

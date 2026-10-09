@@ -19,6 +19,7 @@ ctx.record() 로 남기는 함수를 만들어 STEPS 에 순서대로 넣는다.
 
 import re
 import unicodedata
+import warnings
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -37,6 +38,7 @@ from preprocess.unicode_steps import (
 
 __all__ = [
     "Context",
+    "EXPECTED_UNICODE_VERSION",
     "Event",
     "NormalizedDoc",
     "STEPS",
@@ -48,11 +50,27 @@ __all__ = [
 ]
 
 # 정규화 동작이 바뀔 때마다 올린다. 0.1 = 2주차 말 고정(3단계 학습용), 1.0 = 3주차 말
-VERSION = "0.0.6"
+VERSION = "0.0.7"
 
 # 파이썬 버전마다 유니코드 데이터가 달라 NFKC 결과가 바뀔 수 있다 (3.11 = 14.0, 3.12 = 15.0).
 # 학습과 서빙이 같은 정규화를 거쳤는지 확인할 수 있게 청크 meta 에 같이 남긴다.
 UNICODE_VERSION = unicodedata.unidata_version
+EXPECTED_UNICODE_VERSION = "14.0.0"
+
+
+def _check_unicode_version(version: str = UNICODE_VERSION) -> bool:
+    if version == EXPECTED_UNICODE_VERSION:
+        return True
+    warnings.warn(
+        f"유니코드 {version} 으로 정규화합니다. 팀 기준은 Python 3.11(유니코드 "
+        f"{EXPECTED_UNICODE_VERSION})이라 학습·서빙과 정규화 결과가 달라질 수 있습니다.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return False
+
+
+_check_unicode_version()
 
 FORMATS = ("txt", "md", "html")
 _FORMAT_ALIASES = {"htm": "html", "markdown": "md", "text": "txt"}
