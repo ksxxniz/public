@@ -5,11 +5,14 @@
 범위·순서만 보는 다른 테스트와 달리, 위치가 엉뚱한 글자를 가리키는 실수를 잡는다.
 
 가이드 ⑥: NFD, 1→N 확장, 제로폭, HTML 문서를 반드시 포함한다.
-TODO(3주차): ② HTML/MD 파싱이 들어오면 HTML 사례의 판정 규칙(태그·엔티티·블록 줄바꿈)을
-추가한다. 지금은 HTML 도 글자 그대로 처리되므로 txt 와 같은 규칙으로 통과한다.
+HTML 은 태그(지운 글자), 엔티티(복원), 블록 태그(줄바꿈·공백으로 바뀜) 규칙을 함께 본다.
 """
 
+import html
+import json
+import re
 import unicodedata
+from pathlib import Path
 
 import pytest
 from hypothesis import given, settings
@@ -20,6 +23,14 @@ from preprocess.chunk import split_document
 from preprocess.homoglyph import TO_LATIN
 from preprocess.normalize import normalize_document
 from preprocess.unicode_steps import _STRAY_TO_COMPAT
+
+_MARKUP = re.compile(
+    r"<!---?>|<!--|-->|<!\[CDATA\[|\]\]>|<![^>]*>|<\?[^>]*>|</[^A-Za-z>][^>]*>"
+    r"|</?[A-Za-z](?:=[\t\n\f\r ]*\"[^\"]*\"|=[\t\n\f\r ]*'[^']*'|[^>])*(?:>|\Z)"
+)
+_REFERENCE = re.compile(r"&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z][-.a-zA-Z0-9]*);?")
+_FIXTURES = Path(__file__).parent / "fixtures" / "hidden_html"
+_FIXTURE_NAMES = sorted(json.loads((_FIXTURES / "answers.json").read_text(encoding="utf-8")))
 
 _INVISIBLE_EXTRA = frozenset(
     "\u034f\u115f\u1160\u3164\uffa0\u17b4\u17b5\u2065\u2800\U0001d159\u180b\u180c\u180d\u180f"
@@ -45,8 +56,12 @@ def _to_compat_jamo(s: str) -> str:
     return "".join(_STRAY_TO_COMPAT.get(c, c) for c in unicodedata.normalize("NFKD", s))
 
 
-def _comes_from(ch: str, src: str) -> bool:
+def _comes_from(ch: str, src: str, fmt: str = "txt", in_markup: bool = False) -> bool:
     """정리본 글자 ch 가 원문 조각 src 에서 나올 수 있는가."""
+    if fmt == "html":
+        if ch.isspace() and in_markup:
+            return True
+        src = html.unescape(_MARKUP.sub("", src))
     seen = "".join(c for c in src if not _is_invisible(c))
     if not seen:
         return False  # 지운 글자만 가리키면 위치가 틀린 것이다
@@ -73,10 +88,20 @@ def _is_compat_jamo(c: str) -> bool:
 
 def _check_roundtrip(raw: str, fmt: str = "txt") -> None:
     doc = normalize_document(raw, fmt)
-    covered = [False] * len(raw)
+    markup = [False] * len(raw)
+    if fmt == "html":
+        for m in _MARKUP.finditer(raw):
+            markup[m.start() : m.end()] = [True] * (m.end() - m.start())
+    covered = list(markup)
+    if fmt == "html":
+        for m in _REFERENCE.finditer(raw):
+            value = html.unescape(m.group())
+            if value != m.group() and all(_is_invisible(c) for c in value):
+                covered[m.start() : m.end()] = [True] * (m.end() - m.start())
     for i, ch in enumerate(doc.text):
         s, e = doc.starts[i], doc.ends[i]
-        assert _comes_from(ch, raw[s:e]), f"text[{i}]={ch!r} ← raw[{s}:{e}]={raw[s:e]!r}"
+        ok = _comes_from(ch, raw[s:e], fmt, in_markup=any(markup[s:e]))
+        assert ok, f"text[{i}]={ch!r} ← raw[{s}:{e}]={raw[s:e]!r}"
         for j in range(s, e):
             covered[j] = True
     lost = [(j, c) for j, c in enumerate(raw) if not covered[j] and not _is_invisible(c)]
@@ -118,6 +143,21 @@ CASES = [
         id="interleaved-tags",
     ),
     pytest.param("\ufb01\u0301x \u25fb\ufe0f \u180bx", "txt", id="ligature-emoji-fvs"),
+    pytest.param("<p>A &amp; B &lt;C&gt; &#x41;&#66;&nbsp;끝</p>", "html", id="html-entities"),
+    pytest.param("<div>첫째</div><ul><li>둘</li></ul>셋<br>넷", "html", id="html-blocks"),
+    pytest.param("앞<!-- 주석 -->뒤<![CDATA[자료]]>끝", "html", id="html-comment-cdata"),
+    pytest.param("x<!--<-->y<![CDATA[<]]>z<!--->w</ q>v", "html", id="html-comment-edge"),
+    pytest.param('<img alt="ig&amp;nore"><a title="t">링크</a>', "html", id="html-attrs"),
+    pytest.param("<script>var a=1;</script><style>p{}</style>본문", "html", id="html-script"),
+    pytest.param(
+        '<p style="color:#fff">ｉｇｎ\u200bｏｒｅ</p>', "html", id="html-hidden-fullwidth"
+    ),
+    pytest.param("[//]: # (주석)\n\n![alt](a.png)\n\n본문 <!-- x -->", "md", id="md"),
+    pytest.param(
+        '<?지시?><!DOCTYPE html "x"><p>a&#;b&#7J</p><font color="#fff">흰</font><b">c</b>',
+        "html",
+        id="html-declarations-broken-refs",
+    ),
 ]
 
 
@@ -143,3 +183,8 @@ def test_roundtrip_random(raw):
     _check_roundtrip(raw)
     for chunk in split_document("d", raw):
         assert chunk.transform_log.decoded_count == len(chunk.decoded_segments)
+
+
+@pytest.mark.parametrize("name", _FIXTURE_NAMES)
+def test_roundtrip_hidden_html_fixtures(name):
+    _check_roundtrip((_FIXTURES / name).read_text(encoding="utf-8"), "html")

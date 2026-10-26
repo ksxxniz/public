@@ -4,11 +4,17 @@ normalize.py 와 각 단계 모듈(unicode_steps.py 등)이 서로를 import 하
 따로 떼어 둔 파일이다.
 """
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from common.schema import DecodedSegment, Span, TransformLog
 from preprocess.tracked import RawSpan, TrackedText
+
+MAX_DOCUMENT_CHARS = 2_000_000
+
+
+class DocumentTooLongError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -30,6 +36,7 @@ class Context:
     events: list[Event] = field(default_factory=list)
     # span 은 문서 원문 기준. chunk.py 가 청크 기준으로 바꿔서 넣는다
     decoded_segments: list[DecodedSegment] = field(default_factory=list)
+    renormalize: Callable[[str], str] | None = None
 
     def record(self, kind: str, spans: Iterable[RawSpan], note: str = "") -> None:
         """변환 위치를 남긴다. 청크마다 개수를 세고 위치를 표시하는 데 쓴다."""

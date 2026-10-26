@@ -216,3 +216,18 @@ def test_deep_nesting_stays_fast(html_text):
     started = time.perf_counter()
     parse_html(html_text)
     assert time.perf_counter() - started < 5
+
+
+@pytest.mark.parametrize(
+    ("raw", "content"),
+    [
+        pytest.param("x<!--<-->y", "<", id="lt-comment"),
+        pytest.param("a<!--<!---->b", "<!--", id="opener-comment"),
+        pytest.param("<p>a<![CDATA[<]]></p>", "<", id="lt-cdata"),
+    ],
+)
+def test_comment_and_cdata_pieces_point_to_their_content(raw, content):
+    (piece,) = [p for p in parse_html(raw).pieces if p.hidden]
+    assert piece.text == content
+    assert raw[piece.start : piece.end] == content
+    assert raw[piece.start - 1] in "-["

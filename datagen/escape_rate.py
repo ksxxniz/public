@@ -16,6 +16,7 @@ SIGNALS = (
     "variation_selector_removed",
     "homoglyph_replaced",
     "nfkc_changed",
+    "hidden_text_found",
     "decoded_count",
 )
 
@@ -99,7 +100,7 @@ def render(rows: list[Row], benign: dict[str, dict[str, float]]) -> str:
         "|---|---|---|---|---:|---:|---:|",
     ]
     for r in rows:
-        state = "구현" if r.ready else "3주차 예정"
+        state = "구현" if r.ready else "미구현"
         lines.append(
             f"| {r.key} | {CONCEALMENT[r.concealment]} | {r.stage} | {state} "
             f"| {r.total} | {r.shown} | {r.escape_rate:.0%} |"

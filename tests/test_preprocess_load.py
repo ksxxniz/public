@@ -4,6 +4,7 @@ import codecs
 
 import pytest
 
+from preprocess.chunk import DocumentTooLongError
 from preprocess.load import (
     UnsupportedDocumentError,
     decode_bytes,
@@ -130,3 +131,20 @@ def test_utf32_bom_is_not_read_as_utf16():
 )
 def test_shift_jis_japanese_is_not_read_as_korean(text):
     assert decode_bytes(text.encode("shift_jis")) == (text, "cp932", False)
+
+
+def test_file_over_byte_limit_is_rejected_without_reading(monkeypatch, tmp_path):
+    monkeypatch.setattr("preprocess.load.MAX_DOCUMENT_BYTES", 10)
+    path = _write(tmp_path, "big.txt", b"a" * 11)
+    monkeypatch.setattr(type(path), "read_bytes", _must_not_read)
+    with pytest.raises(DocumentTooLongError, match="상한 10바이트"):
+        read_document(path)
+
+
+def test_file_at_byte_limit_is_read(monkeypatch, tmp_path):
+    monkeypatch.setattr("preprocess.load.MAX_DOCUMENT_BYTES", 10)
+    assert load_document(_write(tmp_path, "ok.txt", b"a" * 10)) == "a" * 10
+
+
+def _must_not_read(self):
+    raise AssertionError("상한을 넘는 파일을 읽었습니다")

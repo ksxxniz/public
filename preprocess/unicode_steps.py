@@ -18,7 +18,7 @@ import re
 import unicodedata
 from itertools import accumulate
 
-from preprocess.context import Context
+from preprocess.context import MAX_DOCUMENT_CHARS, Context, DocumentTooLongError
 from preprocess.tracked import Edit
 
 # ── 1. 태그 문자 ──
@@ -361,6 +361,12 @@ def apply_nfkc(ctx: Context) -> None:
     text = ctx.tt.text
     if unicodedata.is_normalized("NFKC", text) and not _STRAY_JAMO.search(text):
         return
+    size = len(_nfkc(text))
+    if size > MAX_DOCUMENT_CHARS:
+        raise DocumentTooLongError(
+            f"NFKC 정규화로 문서가 {size}자로 늘어나 상한 {MAX_DOCUMENT_CHARS}자를 넘습니다. "
+            "문서를 나눠서 넣어 주세요"
+        )
 
     edits = []
     for s, e, is_jamo in _split_jamo_runs(text):
