@@ -4,7 +4,7 @@ import pytest
 
 from common import examples
 from common.schema import Span
-from preprocess.chunk import chunks_from_document, split_document
+from preprocess.chunk import DocumentTooLongError, chunks_from_document, split_document
 from preprocess.normalize import (
     EXPECTED_UNICODE_VERSION,
     UNICODE_VERSION,
@@ -174,3 +174,30 @@ def test_resolve_format_detects_html_head():
 def test_resolve_format_rejects_pdf():
     with pytest.raises(ValueError, match="지원하지 않는"):
         resolve_format("x", ".pdf")
+
+
+def test_too_many_chunks_is_an_error_not_a_silent_cut():
+    doc = normalize_document("abcdef", "txt")
+    with pytest.raises(DocumentTooLongError, match="상한 2개"):
+        chunks_from_document("d", doc, windows=[(0, 2), (2, 4), (4, 6)], max_chunks=2)
+    assert len(chunks_from_document("d", doc, windows=[(0, 3), (3, 6)], max_chunks=2)) == 2
+
+
+def test_split_document_applies_chunk_limit():
+    with pytest.raises(DocumentTooLongError):
+        split_document("d", "가나다 " * 400, max_chunks=1)
+    assert len(split_document("d", "가나다 " * 400)) > 1
+
+
+def test_document_over_char_limit_is_rejected_before_normalizing(monkeypatch):
+    monkeypatch.setattr("preprocess.normalize.MAX_DOCUMENT_CHARS", 10)
+    with pytest.raises(DocumentTooLongError, match="상한 10자"):
+        split_document("d", "a" * 11)
+    assert len(split_document("d", "a" * 10)) == 1
+
+
+def test_nfkc_expansion_over_char_limit_is_rejected(monkeypatch):
+    monkeypatch.setattr("preprocess.unicode_steps.MAX_DOCUMENT_CHARS", 100)
+    with pytest.raises(DocumentTooLongError, match="NFKC"):
+        split_document("d", "ﷺ" * 6)
+    assert len(split_document("d", "ﷺ" * 5)[0].text) == 90

@@ -53,7 +53,6 @@ def test_example_chunk_golden():
     )
 
 
-@pytest.mark.xfail(strict=True, reason="⑤ 인코딩 복원(Base64)은 3주차. 구현되면 이 표시를 지운다")
 def test_example_chunk_golden_full():
     """가이드 기준: decoded_segments·transform_log 까지 examples.CHUNK 와 같아야 한다.
 

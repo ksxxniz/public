@@ -2,11 +2,12 @@
 
 처리 순서 (가이드 개정판 '처리 순서'). 순서가 틀리면 우회 구멍이 생긴다.
   ① 입력 디코딩 ......... load.py (바이트 → 문자열)
-  ② 포맷 파싱 ........... TODO(3주차) HTML/MD 텍스트 추출, 엔티티 복원, 숨김 구간 표시
+  ② 포맷 파싱 ........... markup.py  HTML 텍스트 추출·엔티티 복원·블록 줄바꿈, 숨김 구간 표시
+                                    (MD 는 글자를 바꾸지 않고 표시만)
   ③ 유니코드 정규화 ..... unicode_steps.py  태그 문자 → 양방향 제어 → 보이지 않는 문자
                                             → NFKC → 자모 조립 → 공백 정리
   ④ 홈글리프 ............ homoglyph.py  문자 체계가 섞인 단어만
-  ⑤ 인코딩 복원 ......... TODO(3주차) 결과는 decoded_segments 로 (본문에 섞지 않음)
+  ⑤ 인코딩 복원 ......... encoding.py  결과는 decoded_segments 로 (본문에 섞지 않음)
   ⑦ 청킹 ................ chunk.py
 
 새 단계 만드는 법: Context 를 받아 ctx.tt(TrackedText)를 고치고, 고친 원문 위치를
@@ -24,8 +25,10 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from common.schema import DecodedSegment
-from preprocess.context import Context, Event
+from preprocess.context import MAX_DOCUMENT_CHARS, Context, DocumentTooLongError, Event
+from preprocess.encoding import restore_encodings
 from preprocess.homoglyph import replace_homoglyphs
+from preprocess.markup import parse_markup
 from preprocess.tracked import TrackedText
 from preprocess.unicode_steps import (
     apply_nfkc,
@@ -38,10 +41,13 @@ from preprocess.unicode_steps import (
 
 __all__ = [
     "Context",
+    "DocumentTooLongError",
     "EXPECTED_UNICODE_VERSION",
     "Event",
+    "MAX_DOCUMENT_CHARS",
     "NormalizedDoc",
     "STEPS",
+    "TEXT_STEPS",
     "UNICODE_VERSION",
     "VERSION",
     "normalize_document",
@@ -49,8 +55,9 @@ __all__ = [
     "resolve_format",
 ]
 
-# 정규화 동작이 바뀔 때마다 올린다. 0.1 = 2주차 말 고정(3단계 학습용), 1.0 = 3주차 말
-VERSION = "0.0.7"
+# 정규화 동작이 바뀔 때마다 올리고 preprocess/CHANGELOG.md 에 적는다.
+# 1.0 = 3주차 말 (2주차 말 0.1 은 따로 내지 않고 1.0 에 합침)
+VERSION = "1.0"
 
 # 파이썬 버전마다 유니코드 데이터가 달라 NFKC 결과가 바뀔 수 있다 (3.11 = 14.0, 3.12 = 15.0).
 # 학습과 서빙이 같은 정규화를 거쳤는지 확인할 수 있게 청크 meta 에 같이 남긴다.
@@ -75,12 +82,13 @@ _check_unicode_version()
 FORMATS = ("txt", "md", "html")
 _FORMAT_ALIASES = {"htm": "html", "markdown": "md", "text": "txt"}
 _HTML_HEAD = re.compile(r"\A\ufeff?\s*(?:<!doctype\s+html|<html[\s>])", re.IGNORECASE)
+_PLAIN_ASCII = re.compile(r"[\t-\r\x1c-\x7e]*")
 
 
 Step = Callable[[Context], None]
 
 # 처리 순서대로 넣는다. 순서를 바꾸면 우회 구멍이 생긴다 (unicode_steps.py 맨 위 설명).
-STEPS: list[Step] = [
+TEXT_STEPS: list[Step] = [
     decode_tag_chars,
     remove_bidi,
     remove_invisible,
@@ -89,6 +97,7 @@ STEPS: list[Step] = [
     assemble_jamo,
     tidy_whitespace,
 ]
+STEPS: list[Step] = [parse_markup, *TEXT_STEPS, restore_encodings]
 
 
 @dataclass
@@ -110,7 +119,12 @@ def normalize_document(
     raw: str, fmt: str | None = None, steps: Iterable[Step] | None = None
 ) -> NormalizedDoc:
     """문서 전체를 정규화한다. steps 를 주면 STEPS 대신 그것만 돌린다 (테스트용)."""
-    ctx = Context(tt=TrackedText(raw), fmt=resolve_format(raw, fmt))
+    if len(raw) > MAX_DOCUMENT_CHARS:
+        raise DocumentTooLongError(
+            f"문서가 {len(raw)}자로 상한 {MAX_DOCUMENT_CHARS}자를 넘습니다. "
+            "문서를 나눠서 넣어 주세요"
+        )
+    ctx = Context(tt=TrackedText(raw), fmt=resolve_format(raw, fmt), renormalize=_renormalize)
     for step in STEPS if steps is None else steps:
         step(ctx)
     tt = ctx.tt
@@ -123,6 +137,13 @@ def normalize_document(
         events=list(ctx.events),
         decoded_segments=list(ctx.decoded_segments),
     )
+
+
+def _renormalize(decoded: str) -> str:
+    steps = [tidy_whitespace] if _PLAIN_ASCII.fullmatch(decoded) else TEXT_STEPS
+    doc = normalize_document(decoded, "txt", steps=steps)
+    tags = "".join(seg.decoded for seg in doc.decoded_segments)
+    return "\n".join(part for part in (doc.text, tags) if part)
 
 
 def normalize_text(raw: str, fmt: str | None = None) -> str:

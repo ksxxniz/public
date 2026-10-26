@@ -7,7 +7,8 @@
 import argparse
 from pathlib import Path
 
-from preprocess.chunk import split_document
+from preprocess.chunk import DocumentTooLongError, split_document
+from preprocess.html_parse import HtmlParserUnavailableError
 from preprocess.load import LoadedDocument, UnsupportedDocumentError, read_document
 from preprocess.normalize import VERSION
 from preprocess.tokens import TokenizerLoadError
@@ -31,7 +32,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         doc = read_document(args.file)
-    except UnsupportedDocumentError as e:
+    except (UnsupportedDocumentError, DocumentTooLongError) as e:
         parser.exit(2, f"오류: {e}\n")
     except FileNotFoundError:
         parser.exit(2, f"오류: 파일이 없습니다: {args.file}\n")
@@ -39,7 +40,7 @@ def main() -> None:
         parser.exit(2, f"오류: 파일을 읽을 수 없습니다: {args.file} ({e.strerror or e})\n")
     try:
         report(args.file, doc)
-    except TokenizerLoadError as e:
+    except (TokenizerLoadError, DocumentTooLongError, HtmlParserUnavailableError) as e:
         parser.exit(2, f"오류: {e}\n")
 
 

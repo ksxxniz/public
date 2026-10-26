@@ -19,7 +19,7 @@ from preprocess.normalize import normalize_text
 
 ATTACKS = [s for s in DEMO_SAMPLES if s["label"] == "injection"]
 BENIGN = [s for s in DEMO_SAMPLES if s["label"] == "benign"]
-PENDING = pytest.mark.xfail(strict=True, reason="3주차 예정 (② HTML/MD, ⑤ 인코딩 복원)")
+PENDING = pytest.mark.xfail(strict=True, reason="아직 구현하지 않은 기법")
 KEYS = [(name,) for name in TECHNIQUES] + list(COMBOS)
 
 
@@ -190,7 +190,8 @@ def test_escape_report_cli(tmp_path):
     out = tmp_path / "escape.md"
     assert escape_rate.main(["--out", str(out), "--fail-on-escape"]) == 0
     text = out.read_text(encoding="utf-8")
-    assert "| homoglyph |" in text and "3주차 예정" in text and "정상 변형" in text
+    assert "| homoglyph |" in text and "정상 변형" in text
+    assert "미구현" not in text and "(탈출률 0%, 목표 0%)" in text
 
 
 def test_homoglyph_generator_uses_only_visual_lookalikes():

@@ -1,3 +1,4 @@
+import codecs
 import colorsys
 import html
 import inspect
@@ -8,7 +9,7 @@ from bisect import bisect_left
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
-from html.parser import HTMLParser
+from html.parser import HTMLParser, attrfind_tolerant, tagfind_tolerant
 
 BLOCK_TAGS = frozenset(
     "address article aside blockquote br dd div dl dt figcaption figure footer form h1 h2 h3 h4 "
@@ -47,6 +48,28 @@ _TABLE_PARTS = frozenset("caption col colgroup tbody td tfoot th thead tr".split
 _TABLE_CONTEXT = frozenset("table tbody tfoot thead tr".split())
 _TABLE_CONTENT = _TABLE_PARTS | frozenset("form input script style template".split())
 _SVG_TEXT = frozenset("text tspan textpath".split())
+ATTRIBUTE_REASONS = {"alt": "attr_alt", "title": "attr_title", "aria-label": "attr_aria_label"}
+_META_NAME = re.compile(r"(?:^|[:.])(?:description|keywords|title|summary|abstract|subject)$")
+_REF_START = r"&(?=#(?:[0-9]+|[xX][0-9a-fA-F]+)[^0-9a-fA-F]|[a-zA-Z][-.a-zA-Z0-9]*[^a-zA-Z0-9])"
+_INTERESTING = re.compile("<|" + _REF_START)
+_XML_DECL = re.compile(
+    r"xml\s+version\s*=\s*([\"'])1\.[0-9]\1"
+    r"(?:\s+encoding\s*=\s*([\"'])([A-Za-z][\w.:-]*)\2)?"
+    r"(?:\s+standalone\s*=\s*([\"'])(?:yes|no)\4)?\s*\??"
+)
+_DOCTYPE = re.compile(
+    r"doctype\s+html"
+    r"(?:\s+public\s+([\"'])-//(?:W3C|IETF)//DTD X?HTML(?:\+RDFa)? [0-9.]+"
+    r"(?: (?:Strict|Transitional|Frameset|Final|Basic|Mobile|Level [0-9]))*//EN\1"
+    r"(?:\s+([\"'])https?://www\.w3\.org/(?:TR|MarkUp)(?:/(?:DTD|html4|xhtml1|xhtml11|"
+    r"xhtml-basic|xhtml-basic1[01]|xhtml-rdfa-1|loose|strict|frameset|"
+    r"xhtml1-(?:strict|transitional|frameset)))+\.dtd\2)?"
+    r"|\s+system\s+([\"'])about:legacy-compat\3)?\s*",
+    re.I,
+)
+_BGCOLOR_TAGS = frozenset("body table thead tbody tfoot tr td th marquee".split())
+_BARE_HEX = re.compile(r"[0-9a-fA-F]{6}")
+_HINT_VALUE = re.compile(r"#?[\w(),.% ]{1,64}")
 
 SAME_COLOR_CONTRAST = 1.2
 MIN_OPACITY = 0.05
@@ -136,6 +159,7 @@ class ParsedHtml:
     raw: str
     pieces: list[Piece] = field(default_factory=list)
     breaks: list[int] = field(default_factory=list)
+    attributes: list[Piece] = field(default_factory=list)
 
     @property
     def hidden_pieces(self) -> list[Piece]:
@@ -176,9 +200,13 @@ def html5_parser_available() -> bool:
     return "scripting" in params and "iframe" in HTMLParser.CDATA_CONTENT_ELEMENTS
 
 
+class HtmlParserUnavailableError(RuntimeError):
+    pass
+
+
 def _require_html5_parser() -> None:
     if not html5_parser_available():
-        raise RuntimeError(
+        raise HtmlParserUnavailableError(
             f"HTML 파서에는 Python 3.11.15 이상이 필요합니다 (지금 {platform.python_version()}). "
             "그 전 버전의 html.parser 는 같은 문서를 다르게 읽어 결과가 달라집니다. "
             "uv python install 3.11.15 로 설치하고 .venv 폴더를 지운 뒤 uv sync 를 하세요."
@@ -207,7 +235,7 @@ def _element_style(tag: str, attrs, parent: _Style) -> _Style:
 @lru_cache(maxsize=8192)
 def _element_style_cached(tag: str, attrs: tuple, parent: _Style) -> _Style:
     attr = _first_attrs(attrs)
-    style = _parse_style(attr.get("style") or "")
+    style = _parse_style(_with_hints(tag, attr))
     font_px = _font_size(style.get("font-size"), parent.font_px)
     color = _color_value(style.get("color"), parent.color)
     svg = (parent.svg or tag == "svg") and tag != "foreignobject"
@@ -221,6 +249,33 @@ def _element_style_cached(tag: str, attrs: tuple, parent: _Style) -> _Style:
         svg=svg,
         svg_text=svg and (parent.svg_text or tag in _SVG_TEXT),
     )
+
+
+def _with_hints(tag: str, attr: dict[str, str]) -> str:
+    hints = [
+        f"{prop}:{color}"
+        for prop, name in _hint_attrs(tag)
+        if (color := _legacy_color(attr.get(name) or "")) is not None
+    ]
+    return ";".join([*hints, attr.get("style") or ""])
+
+
+def _hint_attrs(tag: str) -> list[tuple[str, str]]:
+    out = []
+    if tag == "font":
+        out.append(("color", "color"))
+    if tag == "body":
+        out.append(("color", "text"))
+    if tag in _BGCOLOR_TAGS:
+        out.append(("background-color", "bgcolor"))
+    return out
+
+
+def _legacy_color(value: str) -> str | None:
+    value = value.strip()
+    if not _HINT_VALUE.fullmatch(value):
+        return None
+    return "#" + value if _BARE_HEX.fullmatch(value) else value
 
 
 @lru_cache(maxsize=8192)
@@ -297,6 +352,20 @@ class _Parser(HTMLParser):
         self._at: dict[str, list[int]] = defaultdict(list)
         self._specials: list[int] = []
         self._listed: Counter[str] = Counter()
+
+    def reset(self):
+        super().reset()
+        self.interesting = _INTERESTING
+
+    def clear_cdata_mode(self):
+        super().clear_cdata_mode()
+        self.interesting = _INTERESTING
+
+    def set_cdata_mode(self, elem, *, escapable=False):
+        super().set_cdata_mode(elem, escapable=escapable)
+        if escapable:
+            end = r"|</%s(?=[\t\n\r\f />])" % re.escape(self.cdata_elem)
+            self.interesting = re.compile(_REF_START + end, re.IGNORECASE | re.ASCII)
 
     def _pos(self) -> int:
         line, col = self.getpos()
@@ -402,10 +471,41 @@ class _Parser(HTMLParser):
         return self._stack[-1].style if self._stack else ROOT
 
     def handle_starttag(self, tag, attrs):
+        self._attribute_text(tag, attrs)
         self._start(tag, attrs, self_closing=False)
 
     def handle_startendtag(self, tag, attrs):
+        self._attribute_text(tag, attrs)
         self._start(tag, attrs, self_closing=True)
+
+    def _attribute_text(self, tag, attrs) -> None:
+        wanted = _wanted_attributes(tag, attrs)
+        if not wanted:
+            return
+        tag_text = self.get_starttag_text() or ""
+        base = self._pos()
+        if self.raw[base : base + len(tag_text)] != tag_text:
+            return
+        m = tagfind_tolerant.match(tag_text, 1)
+        k = m.end() if m else len(tag_text)
+        seen: set[str] = set()
+        while k < len(tag_text):
+            a = attrfind_tolerant.match(tag_text, k)
+            if not a or a.end() <= k:
+                break
+            k = a.end()
+            name = a.group(1).lower()
+            if name in seen:
+                continue
+            seen.add(name)
+            if name not in wanted or a.group(3) is None:
+                continue
+            s, e = a.span(3)
+            if e - s >= 2 and tag_text[s] in "'\"" and tag_text[e - 1] == tag_text[s]:
+                s, e = s + 1, e - 1
+            if tag_text[s:e].strip():
+                pieces = _value_pieces(self.raw, base + s, base + e, wanted[name])
+                self.result.attributes.extend(pieces)
 
     def _start(self, tag, attrs, self_closing: bool) -> None:
         if tag in _TABLE_PARTS and self._find({"table"}, _TABLE_SCOPE) is None:
@@ -538,8 +638,67 @@ class _Parser(HTMLParser):
 
     def handle_comment(self, data):
         tag_start = self._pos()
-        start = self.raw.find(data, tag_start) if data else tag_start
-        self.result.pieces.append(Piece(start, start + len(data), data, "comment"))
+        after = tag_start + (4 if self.raw.startswith("<!--", tag_start) else 2)
+        start = self.raw.find(data, after) if data else after
+        if start >= 0:
+            self.result.pieces.append(Piece(start, start + len(data), data, "comment"))
+
+    def unknown_decl(self, data):
+        start = self._pos() + 3
+        if data[:6].lower() != "cdata[":
+            self._markup_text(start, data, "comment")
+            return
+        content = data[6:]
+        if not data.startswith("CDATA[") and content.endswith("]"):
+            content = content[:-1]
+        self._markup_text(start + 6, content, "cdata")
+
+    def handle_pi(self, data):
+        if not _benign_pi(data):
+            self._markup_text(self._pos() + 2, data, "comment")
+
+    def handle_decl(self, decl):
+        if not _DOCTYPE.fullmatch(decl):
+            self._markup_text(self._pos() + 2, decl, "comment")
+
+    def _markup_text(self, start: int, text: str, reason: str) -> None:
+        if text and self.raw.startswith(text, start):
+            self.result.pieces.append(Piece(start, start + len(text), text, reason))
+
+
+def _benign_pi(data: str) -> bool:
+    m = _XML_DECL.fullmatch(data)
+    if m is None:
+        return False
+    try:
+        codecs.lookup(m.group(3) or "utf-8")
+    except LookupError:
+        return False
+    return True
+
+
+def _wanted_attributes(tag: str, attrs) -> dict[str, str]:
+    attr = _first_attrs(attrs)
+    wanted = {name: why for name, why in ATTRIBUTE_REASONS.items() if attr.get(name, "").strip()}
+    meta_name = (attr.get("name") or attr.get("property") or "").strip().lower()
+    if tag == "meta" and _META_NAME.search(meta_name):
+        wanted["content"] = "meta_content"
+    if tag == "input" and (attr.get("type") or "").strip().lower() == "hidden":
+        wanted["value"] = "input_hidden"
+    return wanted
+
+
+def _value_pieces(raw: str, start: int, end: int, reason: str) -> list[Piece]:
+    out: list[Piece] = []
+    pos = start
+    for m in _ENTITY.finditer(raw, start, end):
+        if m.start() > pos:
+            out.append(Piece(pos, m.start(), raw[pos : m.start()], reason))
+        out.append(Piece(m.start(), m.end(), html.unescape(m.group()), reason))
+        pos = m.end()
+    if pos < end:
+        out.append(Piece(pos, end, raw[pos:end], reason))
+    return out
 
 
 def _first_attrs(attrs) -> dict[str, str]:

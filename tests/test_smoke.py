@@ -73,3 +73,27 @@ def test_run_reports_tokenizer_failure_not_missing_file(monkeypatch, capsys, tmp
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "토크나이저" in err and "파일이 없습니다" not in err
+
+
+def test_run_reports_too_long_document(monkeypatch, capsys, tmp_path):
+    path = tmp_path / "long.txt"
+    path.write_text("가나다 " * 400, encoding="utf-8")
+    monkeypatch.setattr("pipeline.run.split_document", _split_with_limit_one)
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, path)
+    assert exc.value.code == 2
+    assert "상한" in capsys.readouterr().err
+
+
+def test_run_reports_too_large_file(monkeypatch, capsys, tmp_path):
+    path = tmp_path / "big.txt"
+    path.write_text("가나다 " * 10, encoding="utf-8")
+    monkeypatch.setattr("preprocess.load.MAX_DOCUMENT_BYTES", 10)
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, path)
+    assert exc.value.code == 2
+    assert "바이트" in capsys.readouterr().err
+
+
+def _split_with_limit_one(doc_id, raw, fmt=None):
+    return split_document(doc_id, raw, fmt, max_chunks=1)
