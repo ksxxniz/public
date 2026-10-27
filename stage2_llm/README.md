@@ -21,9 +21,18 @@ Chunk.text + decoded_segments
 ollama serve                                         # 다른 터미널에서
 uv run python -m stage2_llm.test_connection exaone   # 연결 확인
 uv run python -m stage2_llm.quick_test exaone        # 붙여넣고 END
-uv run python -m stage2_llm.run --model exaone --data 경로.jsonl --limit 5
+uv run python -m stage2_llm.run --model exaone      # 평가 세트 전체 판정
+uv run python -m stage2_llm.report                   # 모델 비교표 만들기
 uv run pytest tests/test_stage2_judge.py             # GPU 없이 도는 테스트
 ```
+
+## 모델 비교
+
+1. 모델마다 `run` 을 한 번씩 돌린다. 기본 데이터는 `evalsets/eval_v0.1.jsonl` (40건).
+2. `report` 가 `results/` 의 결과를 모아 `results/report_v0.3.md` 로 표를 만든다.
+
+평가 세트 `eval_v0.1` 은 D 가 만든 개발용 세트입니다 (영어 30·한국어 10, 정상 20·공격 20,
+그중 하드 네거티브 10). 팀 test 데이터가 아니므로 few-shot 예시를 여기서 고르면 안 됩니다.
 
 ## 정해 둔 처리
 
