@@ -57,3 +57,10 @@
 - (2026-10 추가, 제안) 크기 상한: 파일 8,000,000바이트(`preprocess.load.MAX_DOCUMENT_BYTES`), 원문과 NFKC 뒤 정리본 2,000,000자(`preprocess.normalize.MAX_DOCUMENT_CHARS`), 복원 결과 10,000개·1,000,000자(`preprocess.encoding.MAX_DECODED_SEGMENTS`, `MAX_DECODED_CHARS`)를 넘으면 청크 상한(④)과 같이 `DocumentTooLongError` 로 거부합니다. 파일·원문 크기는 읽거나 정규화하기 전에 봅니다. 처리 시간 상한은 두지 않습니다. 시간으로 끊으면 컴퓨터 속도에 따라 같은 문서의 결과가 달라져 학습과 서빙이 어긋나기 때문입니다. 상한값은 통합 담당과 확정합니다.
 - (2026-10 추가, 제안) 처리 시간 목표: 문서 하나(정규화+청킹)를 10KB 이하는 p95 50ms 이하, 100KB 는 p95 500ms 이하, 1MB 는 p95 5초 이하로 둡니다. 3주차 측정값(글자 토크나이저, 클라우드 2코어)은 10KB 27ms, 100KB 256ms, 1MB 2.3초(p95, 세 형식 중 가장 느린 값)입니다. 실제 토크나이저 기준은 팀 PC 에서 `uv run python -m preprocess.perf_report --out 파일.md` 로 다시 재서 확정합니다.
 - 관련 코드: `common/schema.py` → `TransformLog`, `TransformSpan`, `DecodedSegment`
+
+## ⑦ 2차 판정 실패 처리 (제안: 4단계 D)
+
+- LLM 답변(JSON)을 읽지 못하면 1번 다시 묻고, 그래도 못 읽으면 차단합니다(fail-closed): `label="injection"`, `risk_score=1.0`, `confidence=0.0`.
+- LLM 이 인용한 근거 문장을 `preprocess.quote.find_quote` 로 원문에서 찾지 못하면, 판정은 그대로 두고 `evidence_span` 만 비웁니다. 판정을 바꾸면 실제 공격을 놓칠 수 있기 때문입니다.
+- 2차 서버가 응답하지 않을 때(fail-open / fail-closed)는 통합 담당과 확정합니다.
+- 관련 코드: `stage2_llm/judge.py`, `stage2_llm/config.py` → `MAX_RETRIES`
