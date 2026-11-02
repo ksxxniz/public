@@ -2,6 +2,27 @@
 
 정규화 동작이 바뀌면 `preprocess/normalize.py` 의 `VERSION` 을 올리고 여기에 적습니다. 이 번호는 청크 `meta.normalize_version` 과 검사 로그 `model_ver` 칸에 남습니다. 번호가 바뀌면 같은 문서라도 정리본과 변환 기록이 달라질 수 있으니, 1차 분류기 학습 데이터도 같은 번호로 다시 만듭니다.
 
+## 1.1 (2026-10-31, 4주차)
+
+정리본과 변환 기록이 1.0 과 달라질 수 있습니다. 1.0 으로 만든 학습 데이터는 이 버전으로 다시 만듭니다. `common/schema.py` 가 바뀌었으니(아래) 전원 리뷰가 필요합니다.
+
+**추가**
+- ② HTML: `<style>` 블록의 단순 선택자 규칙(`.x{display:none}`, `#id`, `p.x`, `@media` 안 포함)으로 숨긴 글도 숨김으로 표시합니다. 이유 이름은 인라인 스타일과 같습니다. (`preprocess/html_parse.py`)
+- ② HTML: `href`·`src`·`action`·`data-*` 같은 주소·데이터 속성 값 안의 Base64·Hex·URL 인코딩 등을 풀어 `decoded_segments` 에 넣습니다. 정리본에는 넣지 않습니다.
+- ② HTML·Markdown: 자리표시자(`{대화 내용}` 등)나 32자 이상 쿼리 값이 붙은 외부 이미지 주소를 `hidden_text_found`(note `exfil_image`)로 표시합니다.
+- ③ 변형 선택자 바이트 해독: 이모지 뒤에 변형 선택자를 3개 이상 붙여 숨긴 바이트를 UTF-8 로 풀어 `decoded_segments`(method `variation_selector`)에 넣습니다. 새 단계 `decode_variation_selectors` 가 태그 문자 해독 바로 뒤에 들어갑니다. (`preprocess/unicode_steps.py`)
+- ④ 키릴·그리스 문자로만 쓴 단어가 공격 키워드(`KEYWORDS`, 41개)로 읽히면 라틴 문자로 바꿉니다(`рrеνіουѕ` → `previous`). 개수는 `homoglyph_replaced` 에 들어갑니다. (`preprocess/homoglyph.py`)
+- 복원 결과를 분류기 입력 조각으로 만드는 `preprocess.decoded.decoded_inputs(chunk)`(서빙)와 `decoded_texts(raw, fmt)`(학습). 384토큰을 넘는 복원 결과는 50토큰씩 겹쳐 자르고, 조각은 모두 그 복원 결과의 `span` 을 씁니다. (decisions.md ⑥)
+- 정상 문서 기준선: `python -m preprocess.baseline <폴더·파일·JSONL>` 가 정상 문서의 신호 분포(1000자당 p50·p95·p99·최댓값)와 강한 신호가 켜진 청크 비율(전처리 기준 오탐률)을 표로 뽑고, 켜진 청크를 JSONL 로 저장합니다.
+- 생성기 기법 4개: `css_class`, `attribute_base64`, `variation_selector`, `cyrillic_keyword`. 1.0 에서는 넷 다 탈출률 100% 였고 1.1 에서 0% 입니다.
+
+**바뀜**
+- `common/schema.py`: `DecodedSegment.method` 에 `variation_selector` 추가, `SCHEMA_VERSION` 0.2.3 → 0.2.4.
+- `/` 가 든 Base64 후보(`e.com/aWdu…`)를 통째로 풀었을 때 깨진 글자가 섞이면, `/` 로 나눈 조각을 먼저 풀어 봅니다. 앞 조각이 섞여 들어간 복원 결과가 깔끔해집니다.
+
+**그대로**
+- txt·md 문서의 정리본은 키릴·그리스 키워드가 든 경우를 빼면 1.0 과 같습니다.
+
 ## 1.0 (2026-10-25, 3주차)
 
 팀에 처음 배포하는 버전입니다. 2주차 말에 내기로 한 0.1 은 따로 배포하지 않고 이 버전에 합쳤습니다.
