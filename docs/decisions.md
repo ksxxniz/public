@@ -32,18 +32,18 @@
 - 관련 코드: `common/config.py` → `TOKENIZER_NAME`
 - (2026-10 추가) 384 는 특수 토큰을 포함한 길이로 확정합니다. 후보 세 모델(mDeBERTa-v3-base, klue/roberta-base, xlm-roberta-base)은 모두 문장 하나에 특수 토큰 2개를 붙이므로, 청크 내용은 최대 382토큰입니다. 내용 길이는 `CHUNK_SIZE_TOKENS - (토크나이저가 붙이는 특수 토큰 수)` 로 계산하고, 데이터셋 샘플 길이 검사도 특수 토큰을 붙인 상태로 384 이하인지 봅니다.
 - (2026-10-12 확정) 3단계 1차 모델은 `xlm-roberta-base` 입니다. 청크 토큰 수도 이 토크나이저로 세고, 특수 토큰 2개(`<s>`, `</s>`)를 빼면 청크 내용은 최대 382토큰입니다. 모델을 바꾸면 `TOKENIZER_NAME` 과 이 항목을 같은 PR 에서 고칩니다.
-- (2026-10 추가, 제안) 문서 하나가 청크 1000개(`preprocess.chunk.MAX_CHUNKS`)를 넘으면 앞부분만 자르지 않고 `DocumentTooLongError` 를 냅니다. 앞부분만 검사하고 넘기면 뒤쪽이 우회 구멍이 되기 때문입니다. 상한값은 통합 담당과 확정합니다.
+- (2026-10 추가) 문서 하나가 청크 1000개(`preprocess.chunk.MAX_CHUNKS`)를 넘으면 앞부분만 자르지 않고 `DocumentTooLongError` 를 냅니다. 앞부분만 검사하고 넘기면 뒤쪽이 우회 구멍이 되기 때문입니다.
 
 ## ⑤ 실험 기록
 
 - 실험은 Weights & Biases 의 `rag-guard` 프로젝트에 팀 공용 계정으로 기록합니다.
 - 관련 코드: `common/config.py` → `WANDB_PROJECT`, `WANDB_ENTITY`
 
-## ⑥ 전처리 원칙 (제안: 이 PR 리뷰에서 확정)
+## ⑥ 전처리 원칙
 
 - 원문 좌표는 바이트가 아니라 디코딩된 문자열 기준입니다.
 - 숨김 텍스트(흰 글씨, `display:none`, 주석 등)는 지우지 않고 `text` 에 남기며, 위치는 `Chunk.transform_spans` 에 표시합니다. 실제 RAG 의 AI 가 읽는 내용과 검사 대상을 같게 하기 위해서입니다.
-- 인코딩 복원 결과(`decoded_segments`)는 본문에 섞지 않고, 별도 청크로 만들어 1차에 함께 통과시킵니다. 그 청크의 위치는 원문의 인코딩 구간을 가리킵니다. (3단계 담당과 합의 필요)
+- 인코딩 복원 결과(`decoded_segments`)는 본문에 섞지 않고, 별도 청크로 만들어 1차에 함께 통과시킵니다. 그 청크의 위치는 원문의 인코딩 구간을 가리킵니다.
 - 변환 개수는 `TransformLog`, 위치는 `Chunk.transform_spans` 에 따로 담습니다. 로그 `reason` 칸에는 개수만 들어갑니다.
 - Python 은 3.11 로 고정합니다. 파이썬 버전마다 유니코드 데이터가 달라 NFKC 결과가 바뀔 수 있습니다(3.11 = 14.0, 3.12 = 15.0). 3단계 학습도 3.11 에서 하고, 청크 `meta.unicode_version` 으로 확인합니다.
 - (2026-10 추가) 쪼개 쓴 자모(`ㄱㅗㅇㄱㅕㄱ`)는 NFKC 가 아니라 별도 단계에서 조립합니다. 자모로 쓰인 덩어리 안에서만, 단어 단위로 "남는 자모 0개, 음절 2개 이상"일 때만 조립합니다. 정상 채팅(`ㅋㅋㅋㅠㅠ`, `좋아ㅇㅋ`)을 바꾸지 않기 위해서입니다. 조립한 음절 수는 `TransformLog.jamo_assembled` 에 남깁니다.
@@ -54,6 +54,9 @@
 - (2026-10 추가) ② HTML 은 태그를 지우고, 블록 태그는 줄바꿈으로, 엔티티는 원래 글자로 바꿉니다. 숨김 텍스트(인라인 스타일과 `font color`·`bgcolor` 같은 옛 색 속성으로 숨긴 글, 주석, CDATA, 브라우저가 주석으로 처리하는 `<?…>`·`<!…>`, 표준이 아닌 DOCTYPE, `script`·`style`·`template`·`noscript` 안의 글, `alt`·`title`·`aria-label`·`meta` 설명·`input type=hidden` 값)는 정리본에 남기고, 위치와 이유를 `hidden_text_found`(note 에 이유)로 남깁니다. HTML 파서는 Python 3.11.15 이상에서만 돌고, 그보다 낮으면 `HtmlParserUnavailableError` 를 냅니다.
 - (2026-10 추가) ② Markdown 은 원문 자체가 AI 입력에 가까워서 글자를 하나도 바꾸지 않고 표시만 합니다. 주석(`<!-- -->`, `[//]: # (...)`), 이미지 `alt`, 링크·이미지 `title`, MD 안 HTML 의 숨김 텍스트가 대상이고, 코드 블록·인라인 코드 안은 표시하지 않습니다. MD 안 HTML 의 표시는 HTML 파서가 없는 Python(3.11.15 미만)에서는 건너뜁니다. 정리본은 같으므로 학습용 `normalize_text` 는 그대로 씁니다.
 - (2026-10 추가) ⑤ 인코딩 복원은 Base64(표준·URL-safe, 패딩 유무, 줄바꿈된 것), Hex(`\x69`·`0x` 형태 포함), URL(`%XX` 3개 이상 연속), ROT13(흔한 영어 단어 비율이 크게 오를 때만, 근처에 rot13 언급이 있으면 기준을 낮춤)을 풉니다. 푼 바이트는 UTF-8 로 읽고 NUL 이 많거나 한글이 대부분이면 UTF-16 으로 읽으며, 깨진 바이트·제어 문자가 약 10% 이하이면서 글자가 하나 이상 있을 때만 받아들입니다(20자 미만은 깨진 글자가 없어야 함). 숫자로만 된 Hex 는 영어 단어로 풀릴 때만 받아들입니다. 최대 3겹까지 풀고, 겹친 속에 ROT13 이 있어도 풉니다. 이미지 data URI 는 따로 건너뛰지 않고 같은 검사로 거릅니다. 본문에 글자로 적힌 HTML 엔티티(`&#105;`)와 `\u0069` 같은 표기는 글자·숫자나 보이지 않는 문자로 풀리는 숫자 표기가 있을 때만, 그 표기가 있는 줄(앞뒤 200자까지)을 통째로 풀어 `html_entity`·`unicode_escape` 로 넣습니다. `&amp;`·`&eacute;` 같은 이름 엔티티와 기호로 풀리는 표기만 있으면 풀지 않습니다. 복원 결과는 ③·④ 를 다시 거쳐 `decoded_segments` 에 넣고 본문에는 섞지 않습니다.
-- (2026-10 추가, 제안) 크기 상한: 파일 8,000,000바이트(`preprocess.load.MAX_DOCUMENT_BYTES`), 원문과 NFKC 뒤 정리본 2,000,000자(`preprocess.normalize.MAX_DOCUMENT_CHARS`), 복원 결과 10,000개·1,000,000자(`preprocess.encoding.MAX_DECODED_SEGMENTS`, `MAX_DECODED_CHARS`)를 넘으면 청크 상한(④)과 같이 `DocumentTooLongError` 로 거부합니다. 파일·원문 크기는 읽거나 정규화하기 전에 봅니다. 처리 시간 상한은 두지 않습니다. 시간으로 끊으면 컴퓨터 속도에 따라 같은 문서의 결과가 달라져 학습과 서빙이 어긋나기 때문입니다. 상한값은 통합 담당과 확정합니다.
-- (2026-10 추가, 제안) 처리 시간 목표: 문서 하나(정규화+청킹)를 10KB 이하는 p95 50ms 이하, 100KB 는 p95 500ms 이하, 1MB 는 p95 5초 이하로 둡니다. 3주차 측정값(글자 토크나이저, 클라우드 2코어)은 10KB 27ms, 100KB 256ms, 1MB 2.3초(p95, 세 형식 중 가장 느린 값)입니다. 실제 토크나이저 기준은 팀 PC 에서 `uv run python -m preprocess.perf_report --out 파일.md` 로 다시 재서 확정합니다.
+- (2026-10 추가) 크기 상한: 파일 8,000,000바이트(`preprocess.load.MAX_DOCUMENT_BYTES`), 원문과 NFKC 뒤 정리본 2,000,000자(`preprocess.normalize.MAX_DOCUMENT_CHARS`), 복원 결과 10,000개·1,000,000자(`preprocess.encoding.MAX_DECODED_SEGMENTS`, `MAX_DECODED_CHARS`)를 넘으면 청크 상한(④)과 같이 `DocumentTooLongError` 로 거부합니다. 파일·원문 크기는 읽거나 정규화하기 전에 봅니다. 처리 시간 상한은 두지 않습니다. 시간으로 끊으면 컴퓨터 속도에 따라 같은 문서의 결과가 달라져 학습과 서빙이 어긋나기 때문입니다.
+- (2026-10 추가) 처리 시간 목표: 문서 하나(정규화+청킹)를 10KB 이하는 p95 50ms 이하, 100KB 는 p95 500ms 이하, 1MB 는 p95 5초 이하로 둡니다. 3주차 측정값(글자 토크나이저, 클라우드 2코어)은 10KB 27ms, 100KB 256ms, 1MB 2.3초(p95, 세 형식 중 가장 느린 값)입니다. 실제 토크나이저 기준은 팀 PC 에서 `uv run python -m preprocess.perf_report --out 파일.md` 로 다시 재서 확정합니다.
+- (2026-10-26 측정) 실제 토크나이저(`xlm-roberta-base`)로 팀 PC(Windows)에서 잰 p95 는 10KB 18ms, 100KB 152ms, 1MB 1.8초(세 형식 중 가장 느린 값)로 위 목표 안입니다. 1MB 한국어·영어 문서는 청크 700~800개라서 청크 상한 1000개는 약 1.2~1.4MB 문서에 해당합니다. 표는 `docs/preprocess_scope.md` 6절에 있습니다.
+- (2026-10-26 확정) 복원 결과(`decoded_segments`)는 하나씩 따로 1차 분류기에 넣습니다. 한 청크의 복원 결과를 이어 붙이지 않습니다. 384토큰을 넘는 복원 결과는 청크와 같은 방식(384토큰, 50토큰 겹침)으로 자르고, 잘린 조각은 모두 그 복원 결과의 원문 인코딩 구간 전체(`span`)를 위치로 씁니다. 긴 Base64 덩어리 전체가 하이라이트되지만 틀린 위치는 아닙니다. 학습 데이터에도 복원 결과를 넣어 서빙과 같게 합니다. 서빙과 학습 모두 `preprocess.decoded` 의 `decoded_inputs`(청크 하나)·`decoded_texts`(학습 샘플 하나)로 같은 조각을 만듭니다. `html_entity`·`unicode_escape` 는 표기가 있는 줄 전체를 푼 글이라 앞뒤의 평범한 글도 함께 들어갑니다.
+- (2026-10-31 추가, 정규화 1.1) ② HTML 숨김 판정에 `<style>` 블록의 단순 선택자 규칙(태그·클래스·ID, `@media` 안 포함)을 더합니다. 자손 선택자 등은 보지 않습니다. `href`·`src`·`data-*` 같은 주소·데이터 속성 값은 정리본에 넣지 않고 그 안의 인코딩만 ⑤ 에서 풀어 `decoded_segments` 에 넣습니다. 자리표시자나 긴 쿼리 값이 붙은 외부 이미지 주소(`<img src>`, MD 이미지)는 `hidden_text_found`(note `exfil_image`)로 표시합니다. ③ 에서 변형 선택자 3개 이상으로 숨긴 바이트를 해독해 `decoded_segments`(method `variation_selector`)에 넣습니다. 이 method 값을 위해 `common/schema.py` 의 `DecodedSegment.method` 에 `variation_selector` 를 더하고 `SCHEMA_VERSION` 을 0.2.4 로 올립니다. ④ 에서 키릴·그리스 문자로만 쓴 단어도 공격 키워드 목록(`preprocess.homoglyph.KEYWORDS`)에 있는 단어로 읽힐 때만 라틴 문자로 바꿉니다.
 - 관련 코드: `common/schema.py` → `TransformLog`, `TransformSpan`, `DecodedSegment`

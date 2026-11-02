@@ -1,12 +1,13 @@
-"""③ 유니코드 정규화 단계 6개. normalize.STEPS 에 이 순서대로 들어간다.
+"""③ 유니코드 정규화 단계 7개. normalize.STEPS 에 이 순서대로 들어간다.
 
   1. decode_tag_chars   태그 문자 해독        → tag_chars_decoded, decoded_segments
-  2. remove_bidi        양방향 제어문자 제거   → bidi_removed
-  3. remove_invisible   보이지 않는 문자 제거  → zero_width_removed, hangul_filler_removed,
+  2. decode_variation_selectors  변형 선택자로 숨긴 바이트 해독 → decoded_segments
+  3. remove_bidi        양방향 제어문자 제거   → bidi_removed
+  4. remove_invisible   보이지 않는 문자 제거  → zero_width_removed, hangul_filler_removed,
                                                   variation_selector_removed, emoji_zwj
-  4. apply_nfkc         NFKC (호환 자모는 건드리지 않음) → nfkc_changed
-  5. assemble_jamo      쪼갠 자모 조립 (ㄱㅗㅇㄱㅕㄱ → 공격) → jamo_assembled
-  6. tidy_whitespace    줄바꿈·공백 정리 (기록 안 함, 의심 신호가 아님)
+  5. apply_nfkc         NFKC (호환 자모는 건드리지 않음) → nfkc_changed
+  6. assemble_jamo      쪼갠 자모 조립 (ㄱㅗㅇㄱㅕㄱ → 공격) → jamo_assembled
+  7. tidy_whitespace    줄바꿈·공백 정리 (기록 안 함, 의심 신호가 아님)
 
 순서가 중요하다. 태그 문자와 양방향 제어문자도 유니코드 분류가 Cf(형식 문자)라서,
 3번의 "Cf 는 지운다" 규칙이 먼저 돌면 태그 문자는 해독 전에 사라지고 양방향 제어문자는
@@ -19,6 +20,7 @@ import unicodedata
 from itertools import accumulate
 
 from preprocess.context import MAX_DOCUMENT_CHARS, Context, DocumentTooLongError
+from preprocess.encoding import _acceptable, _bytes_text
 from preprocess.tracked import Edit
 
 # ── 1. 태그 문자 ──
@@ -90,6 +92,39 @@ def decode_tag_chars(ctx: Context) -> None:
     ctx.record(
         "tag_chars_decoded", [s for e, s in zip(edits, spans, strict=True) if e.start in flagged]
     )
+
+
+MIN_SELECTOR_BYTES = 3
+
+
+def _selector_byte(ch: str) -> int | None:
+    cp = ord(ch)
+    if 0xFE00 <= cp <= 0xFE0F:
+        return cp - 0xFE00
+    if 0xE0100 <= cp <= 0xE01EF:
+        return cp - 0xE0100 + 16
+    return None
+
+
+def decode_variation_selectors(ctx: Context) -> None:
+    tt = ctx.tt
+    text = tt.text
+    i = 0
+    while i < len(text):
+        if _selector_byte(text[i]) is None:
+            i += 1
+            continue
+        j = i
+        while j < len(text) and _selector_byte(text[j]) is not None:
+            j += 1
+        if j - i >= MIN_SELECTOR_BYTES:
+            data = bytes(b for b in (_selector_byte(c) for c in text[i:j]) if b is not None)
+            decoded = _bytes_text(data)
+            if _acceptable(decoded):
+                if ctx.renormalize is not None:
+                    decoded = ctx.renormalize(decoded)
+                ctx.add_decoded("variation_selector", tt.raw_span(i, j), decoded)
+        i = j
 
 
 # ── 2. 양방향 제어문자 ──

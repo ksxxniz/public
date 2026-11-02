@@ -22,7 +22,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "0.2.3"
+SCHEMA_VERSION = "0.2.4"
 
 Label = Literal["benign", "injection"]
 Stage = Literal["preprocess", "rule", "stage1", "stage2"]
@@ -50,7 +50,16 @@ class Span(_Model):
 class DecodedSegment(_Model):
     """Base64 등을 복원한 결과. 본문에 섞지 않고 여기 따로 담는다"""
 
-    method: Literal["base64", "hex", "url", "rot13", "unicode_tag", "html_entity", "unicode_escape"]
+    method: Literal[
+        "base64",
+        "hex",
+        "url",
+        "rot13",
+        "unicode_tag",
+        "html_entity",
+        "unicode_escape",
+        "variation_selector",
+    ]
     span: Span  # 원문에서 인코딩된 문자열이 있던 위치
     decoded: str  # 복원된 내용
     depth: int = Field(default=1, ge=1)  # 몇 겹으로 감싸져 있었나
