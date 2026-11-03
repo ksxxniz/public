@@ -1,6 +1,6 @@
 """results/ 의 실험 결과를 모아 모델 비교표(마크다운)를 만든다.
 
-실행: uv run python -m stage2_llm.report [--prompt v0.3] [--out 파일.md]
+실행: uv run python -m stage2_llm.report [--name 데이터이름] [--prompt v0.3] [--out 파일.md]
 run.py 로 모델마다 한 번씩 돌린 뒤 실행한다. 같은 프롬프트 버전끼리만 비교한다.
 """
 
@@ -13,6 +13,8 @@ from pathlib import Path
 from stage2_llm.config import PROMPT_VERSION
 
 RESULTS_DIR = Path(__file__).parent / "results"
+DEFAULT_NAME = "eval_v0.1"
+MAX_MISTAKES = 30  # 모델마다 틀린 문서를 최대 몇 개까지 보여줄지
 
 LICENSES = {
     "exaone": "EXAONE AI Model License (비상업)",
@@ -33,9 +35,9 @@ def p95(values: list[float]) -> float:
     return statistics.quantiles(values, n=20, method="inclusive")[-1]
 
 
-def load(prompt_version: str) -> dict[str, tuple[list[dict], dict]]:
+def load(prompt_version: str, name: str) -> dict[str, tuple[list[dict], dict]]:
     runs = {}
-    for path in sorted(RESULTS_DIR.glob(f"*_{prompt_version}.jsonl")):
+    for path in sorted((RESULTS_DIR / name).glob(f"*_{prompt_version}.jsonl")):
         key = path.name[: -len(f"_{prompt_version}.jsonl")]
         with open(path, encoding="utf-8") as f:
             docs = [json.loads(line) for line in f if line.strip()]
@@ -107,7 +109,7 @@ def mistakes(runs: dict) -> list[str]:
         if not wrong:
             continue
         lines.append(f"\n**{k}** ({len(wrong)}건)\n")
-        for d in wrong:
+        for d in wrong[:MAX_MISTAKES]:
             reasons = [
                 (c["info"].get("llm") or {}).get("reason") or "(답변 못 읽음)" for c in d["chunks"]
             ]
@@ -118,17 +120,26 @@ def mistakes(runs: dict) -> list[str]:
     return lines
 
 
-def build(prompt_version: str) -> str:
-    runs = load(prompt_version)
+def build(prompt_version: str, name: str) -> str:
+    runs = load(prompt_version, name)
     if not runs:
-        return f"results/ 에 *_{prompt_version}.jsonl 결과가 없습니다. run.py 를 먼저 돌리세요."
+        names = sorted(p.name for p in RESULTS_DIR.glob("*") if p.is_dir())
+        return (
+            f"results/{name}/ 에 *_{prompt_version}.jsonl 결과가 없습니다. "
+            "run.py 를 먼저 돌리세요.\n"
+            f"있는 데이터 이름: {', '.join(names) or '없음'}"
+        )
+    sizes = {k: len(docs) for k, (docs, _) in runs.items()}
 
     head = (
         "| 모델 | 탐지율 | 탐지율(영어) | 탐지율(한국어) | 오탐률 | 하드 네거티브 정답률 "
         "| JSON 성공률 | 첫 시도 성공률 | 근거 exact | 평균 지연 | p95 지연 | VRAM | 라이선스 |"
     )
     lines = [
-        f"# 2차 LLM 모델 비교 (프롬프트 {prompt_version})",
+        f"# 2차 LLM 모델 비교 ({name}, 프롬프트 {prompt_version})",
+        "",
+        f"문서 수: {sizes}"
+        + ("  ⚠️ 모델마다 문서 수가 다릅니다" if len(set(sizes.values())) > 1 else ""),
         "",
         head,
         "|---|" + "---|" * 12,
@@ -164,16 +175,18 @@ def build(prompt_version: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="2차 LLM 모델 비교표")
+    parser.add_argument("--name", default=DEFAULT_NAME, help="데이터 이름 (run.py 의 --name)")
     parser.add_argument("--prompt", default=PROMPT_VERSION, help="비교할 프롬프트 버전")
     parser.add_argument(
-        "--out", default=None, help="저장할 .md 경로 (기본: results/report_버전.md)"
+        "--out", default=None, help="저장할 .md 경로 (기본: results/이름/report_버전.md)"
     )
     args = parser.parse_args()
 
-    text = build(args.prompt)
+    text = build(args.prompt, args.name)
     print(text)
-    out = Path(args.out) if args.out else RESULTS_DIR / f"report_{args.prompt}.md"
-    if RESULTS_DIR.exists():
+    folder = RESULTS_DIR / args.name
+    out = Path(args.out) if args.out else folder / f"report_{args.prompt}.md"
+    if folder.exists():
         out.write_text(text + "\n", encoding="utf-8")
         print(f"\n저장: {out}")
 

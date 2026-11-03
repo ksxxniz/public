@@ -28,11 +28,32 @@ uv run pytest tests/test_stage2_judge.py             # GPU 없이 도는 테스�
 
 ## 모델 비교
 
-1. 모델마다 `run` 을 한 번씩 돌린다. 기본 데이터는 `evalsets/eval_v0.1.jsonl` (40건).
-2. `report` 가 `results/` 의 결과를 모아 `results/report_v0.3.md` 로 표를 만든다.
+1. 모델마다 `run` 을 한 번씩 돌린다.
+2. `report` 가 결과를 모아 `results/{데이터이름}/report_v0.3.md` 로 표를 만든다.
 
-평가 세트 `eval_v0.1` 은 D 가 만든 개발용 세트입니다 (영어 30·한국어 10, 정상 20·공격 20,
-그중 하드 네거티브 10). 팀 test 데이터가 아니므로 few-shot 예시를 여기서 고르면 안 됩니다.
+```bash
+# 내 평가 세트 (evalsets/eval_v0.1.jsonl, 40건)
+uv run python -m stage2_llm.run --model exaone
+uv run python -m stage2_llm.report
+
+# 팀 데이터 폴더 (metadata_*.jsonl + 문서 파일)
+uv run python -m stage2_llm.run --model exaone --data datasets/v0.1 --sample 200
+uv run python -m stage2_llm.report --name v0.1
+```
+
+| 옵션 | 뜻 |
+|---|---|
+| `--data` | jsonl 파일 또는 팀 데이터 폴더. 폴더면 `metadata_*.jsonl` 을 찾아 문서 파일 내용을 읽는다 |
+| `--sample N` | 언어·라벨 비율을 유지하며 N개만. seed 고정이라 모델이 달라도 같은 문서 |
+| `--limit N` | 앞에서 N개만 (시험용) |
+| `--resume` | 중간에 끊겼을 때 이미 판정한 문서는 건너뛰고 이어서 |
+| `--name` | 결과 폴더 이름 (기본: 데이터 파일·폴더 이름) |
+
+팀 데이터의 label 0/1, language, file_path 는 `stage1/convert.py` 와 같은 규칙으로 읽는다.
+`hard_negative: true` 인 문서는 하드 네거티브 정답률에 들어간다.
+
+`eval_v0.1` 은 D 가 만든 개발용 세트입니다 (영어 30·한국어 10, 정상 20·공격 20,
+그중 하드 네거티브 10). few-shot 예시는 팀 train 데이터에서만 고르고, test 는 쓰지 않습니다.
 
 ## 정해 둔 처리
 
