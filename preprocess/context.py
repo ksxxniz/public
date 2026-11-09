@@ -37,6 +37,7 @@ class Context:
     # span 은 문서 원문 기준. chunk.py 가 청크 기준으로 바꿔서 넣는다
     decoded_segments: list[DecodedSegment] = field(default_factory=list)
     renormalize: Callable[[str], str] | None = None
+    url_values: list[tuple[int, int, str]] = field(default_factory=list)
 
     def record(self, kind: str, spans: Iterable[RawSpan], note: str = "") -> None:
         """변환 위치를 남긴다. 청크마다 개수를 세고 위치를 표시하는 데 쓴다."""

@@ -3,7 +3,13 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 
 from preprocess.context import Context
-from preprocess.html_parse import ATTRIBUTE_REASONS, Piece, html5_parser_available, parse_html
+from preprocess.html_parse import (
+    ATTRIBUTE_REASONS,
+    Piece,
+    exfil_url,
+    html5_parser_available,
+    parse_html,
+)
 from preprocess.tracked import Edit
 
 _TAG_CHARS = re.compile("[\U000e0000-\U000e007f]+")
@@ -27,6 +33,7 @@ _MD_COMMENT = re.compile(
     r"^ {0,3}" + _LABEL + r":[ \t]*(?:#|<>)(?:" + _SEP + _TITLE + r")?[ \t]*$", re.M
 )
 _IMAGE = re.compile(r"!" + _LABEL + r"\([ \t]*" + _DEST + r"(?:" + _SEP + _TITLE + r")?[ \t]*\)")
+_IMAGE_DEST = re.compile(r"!" + _LABEL + r"\([ \t]*(" + _DEST + ")")
 _REF_IMAGE = re.compile(r"!" + _LABEL + r"\[[^\[\]\n]*\]")
 _LINK = re.compile(r"(?<!!)" + _LABEL + r"\([ \t]*" + _DEST + _SEP + _TITLE + r"[ \t]*\)")
 _REF_DEF = re.compile(
@@ -49,6 +56,10 @@ def _extract_html(ctx: Context) -> None:
     breaks = sorted(set(parsed.breaks))
     for s, e, reason in _hidden_regions(kept):
         ctx.record("hidden_text_found", [tt.raw_span(s, e)], note=reason)
+    for m in parsed.marks:
+        ctx.record("hidden_text_found", [tt.raw_span(m.start, m.end)], note=m.hidden or "")
+    for v in parsed.url_values:
+        ctx.url_values.append((*tt.raw_span(v.start, v.end), v.text))
     edits: list[Edit] = []
     prev: Piece | None = None
     for cur in [*kept, None]:
@@ -121,6 +132,7 @@ def _mark_markdown(ctx: Context) -> None:
     text = ctx.tt.text
     scan = _blank_code(text)
     found: list[tuple[int, int, str]] = []
+    exfil: list[tuple[int, int, str]] = []
     for m in _MD_COMMENT.finditer(scan):
         if any(m.group(g) is not None for g in (2, 3, 4)):
             found.append(_group_span(m, (2, 3, 4), "md_comment"))
@@ -129,6 +141,9 @@ def _mark_markdown(ctx: Context) -> None:
     for m in _IMAGE.finditer(scan):
         found.append(_group_span(m, (1,), "attr_alt"))
         found.append(_group_span(m, (2, 3, 4), "attr_title"))
+    for m in _IMAGE_DEST.finditer(scan):
+        if exfil_url(m.group(2).strip("<>")):
+            exfil.append((m.start(2), m.end(2), "exfil_image"))
     for m in _REF_IMAGE.finditer(scan):
         found.append(_group_span(m, (1,), "attr_alt"))
     for rx in (_LINK, _REF_DEF):
@@ -139,7 +154,8 @@ def _mark_markdown(ctx: Context) -> None:
         for p in parsed.pieces + parsed.attributes:
             if p.hidden:
                 found.append((p.start, p.end, p.hidden))
-    for s, e, reason in _merge(found, text):
+        exfil.extend((p.start, p.end, p.hidden or "") for p in parsed.marks)
+    for s, e, reason in _merge(found, text) + _merge(exfil, text):
         ctx.record("hidden_text_found", [ctx.tt.raw_span(s, e)], note=reason)
 
 
