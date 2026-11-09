@@ -174,3 +174,27 @@ def test_tokenizer_load_failure_is_not_a_missing_file_error(tmp_path: Path):
     with pytest.raises(TokenizerLoadError) as exc:
         load_tokenizer(str(tmp_path / "없는토크나이저.json"))
     assert not isinstance(exc.value, OSError)
+
+
+def test_perf_report_prints_table(tmp_path, capsys):
+    from preprocess import perf_report
+
+    out = tmp_path / "perf.md"
+    code = perf_report.main(["--sizes", "1000,2000", "--repeats", "2", "--out", str(out)])
+    assert code == 0
+    table = out.read_text(encoding="utf-8")
+    assert table == capsys.readouterr().out.rstrip("\n") + "\n"
+    rows = [line for line in table.splitlines() if line.startswith("| ") and "ms" in line]
+    assert [row.split(" | ")[:2] for row in rows] == [
+        [f"| {fmt}", size] for fmt in ("txt", "md", "html") for size in ("1KB", "2KB")
+    ]
+    assert "토크나이저 char" in table
+
+
+def test_perf_report_sample_documents_have_requested_size():
+    from preprocess.perf_report import sample_document
+
+    for fmt in ("txt", "md", "html"):
+        doc = sample_document(fmt, 10_000)
+        assert 10_000 <= len(doc.encode("utf-8")) < 11_000
+        assert sample_document(fmt, 10_000) == doc

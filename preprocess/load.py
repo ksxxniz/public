@@ -17,7 +17,8 @@ from pathlib import Path
 from charset_normalizer import from_bytes
 
 from common.config import SUPPORTED_EXTENSIONS
-from preprocess.normalize import resolve_format
+from preprocess.context import DocumentTooLongError
+from preprocess.normalize import MAX_DOCUMENT_CHARS, resolve_format
 
 # 맨 앞 바이트로 확실히 알 수 있는 인코딩. 윈도우 메모장의 "유니코드" 저장이 UTF-16 이다
 _BOMS = (
@@ -27,6 +28,8 @@ _BOMS = (
     (codecs.BOM_UTF16_LE, "utf-16-le"),
     (codecs.BOM_UTF16_BE, "utf-16-be"),
 )
+
+MAX_DOCUMENT_BYTES = 4 * MAX_DOCUMENT_CHARS
 
 
 class UnsupportedDocumentError(ValueError):
@@ -48,6 +51,12 @@ def read_document(path: str | Path) -> LoadedDocument:
     if ext not in SUPPORTED_EXTENSIONS:
         raise UnsupportedDocumentError(
             f"지원하지 않는 형식입니다: {path.name} (지원: {', '.join(SUPPORTED_EXTENSIONS)})"
+        )
+    size = path.stat().st_size
+    if size > MAX_DOCUMENT_BYTES:
+        raise DocumentTooLongError(
+            f"파일이 {size}바이트로 상한 {MAX_DOCUMENT_BYTES}바이트를 넘습니다. "
+            "문서를 나눠서 넣어 주세요"
         )
     raw, encoding, had_bom = decode_bytes(path.read_bytes())
     return LoadedDocument(raw=raw, fmt=resolve_format(raw, ext), encoding=encoding, had_bom=had_bom)
@@ -82,6 +91,9 @@ def decode_bytes(data: bytes) -> tuple[str, str, bool]:
     try:
         text = data.decode("cp949")
         if _looks_korean(text):
+            japanese = _as_japanese(data, text)
+            if japanese is not None:
+                return japanese, "cp932", False
             return text, "cp949", False
     except UnicodeDecodeError:
         pass
@@ -100,3 +112,23 @@ def _looks_korean(text: str) -> bool:
         return True
     hangul = sum(1 for c in non_ascii if "\uac00" <= c <= "\ud7a3" or "\u3131" <= c <= "\u318e")
     return hangul / len(non_ascii) >= 0.6
+
+
+_COMMON_HANGUL = frozenset(
+    bytes((lead, trail)).decode("cp949")
+    for lead in range(0xB0, 0xC9)
+    for trail in range(0xA1, 0xFF)
+)
+
+
+def _as_japanese(data: bytes, korean: str) -> str | None:
+    syllables = [c for c in korean if "\uac00" <= c <= "\ud7a3"]
+    if 2 * sum(1 for c in syllables if c in _COMMON_HANGUL) >= len(syllables):
+        return None
+    try:
+        text = data.decode("cp932")
+    except UnicodeDecodeError:
+        return None
+    non_ascii = [c for c in text if ord(c) >= 0x80]
+    hiragana = sum(1 for c in non_ascii if "\u3041" <= c <= "\u3096")
+    return text if non_ascii and hiragana / len(non_ascii) >= 0.2 else None

@@ -69,12 +69,29 @@ VISUAL_CONFUSABLE: dict[str, str] = _build_confusable_table()
 CONFUSABLE: dict[str, str] = _add_nfkc_forms(VISUAL_CONFUSABLE)
 TO_LATIN: dict[str, str] = {**CONFUSABLE, **SUPPLEMENT}
 
+KEYWORDS = frozenset(
+    """
+    ignore ignored ignoring disregard forget previous prior above earlier instruction
+    instructions system prompt prompts rule rules override admin administrator developer
+    password passwords secret secrets reveal print output execute command commands assistant
+    jailbreak unrestricted unfiltered confidential bypass pretend verbatim token tokens
+    credentials
+    """.split()
+)
+
 _CANDIDATE = re.compile("[" + "".join(re.escape(c) for c in TO_LATIN) + "]")
-_WORD = re.compile(r"[^\W\d_]+")
+_MARKS = "".join(chr(cp) for cp in range(0x300, 0x20000) if unicodedata.category(chr(cp))[0] == "M")
+_WORD = re.compile(r"(?:[^\W\d_]|[" + _MARKS + "])+")
 
 
 def _is_latin(ch: str) -> bool:
     return unicodedata.name(ch, "").startswith("LATIN")
+
+
+def _disguised_keyword(word: str) -> bool:
+    if not all(c in TO_LATIN for c in word):
+        return False
+    return "".join(TO_LATIN[c] for c in word).lower() in KEYWORDS
 
 
 def replace_homoglyphs(ctx: Context) -> None:
@@ -86,10 +103,17 @@ def replace_homoglyphs(ctx: Context) -> None:
         word = m.group()
         if not _CANDIDATE.search(word):
             continue
-        mixed = any(_is_latin(c) for c in word)
+        mixed = any(_is_latin(c) for c in word) or _disguised_keyword(word)
         for k, ch in enumerate(word):
             if ch in SUPPLEMENT or (mixed and ch in CONFUSABLE):
                 pos = m.start() + k
-                edits.append(Edit(pos, pos + 1, TO_LATIN[ch]))
+                end = pos + 1
+                while end < len(text) and unicodedata.combining(text[end]):
+                    end += 1
+                new = unicodedata.normalize("NFKC", TO_LATIN[ch] + text[pos + 1 : end])
+                if len(new) == end - pos and new[1:] == text[pos + 1 : end]:
+                    edits.append(Edit(pos, pos + 1, TO_LATIN[ch]))
+                else:
+                    edits.append(Edit(pos, end, new, block=True))
     if edits:
         ctx.record("homoglyph_replaced", ctx.tt.apply(edits))

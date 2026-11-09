@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from common import examples
 from common.schema import Chunk, DecodedSegment, Span, TransformLog, TransformSpan
+from preprocess.chunk import split_document
 
 
 def _chunk(raw: str, text: str, offset_map: list[int], **kw) -> Chunk:
@@ -71,7 +72,9 @@ def test_transform_span_accepted():
     assert _chunk("ab", "ab", [0, 1], transform_spans=[ok]).transform_spans == [ok]
 
 
-@pytest.mark.parametrize("method", ["unicode_tag", "html_entity", "unicode_escape"])
+@pytest.mark.parametrize(
+    "method", ["unicode_tag", "html_entity", "unicode_escape", "variation_selector"]
+)
 def test_new_decoded_methods_accepted(method):
     seg = DecodedSegment(method=method, span=Span(start=0, end=1), decoded="x")
     assert seg.method == method
@@ -79,3 +82,15 @@ def test_new_decoded_methods_accepted(method):
 
 def test_transform_log_counts_nfkc_changes():
     assert TransformLog(nfkc_changed=3).nfkc_changed == 3
+
+
+def test_raw_span_covers_whole_group_from_any_char():
+    c = _chunk("\ufb01\u0301x", "f\u00edx", [0, 0, 2])
+    assert c.raw_span(0, 1) == c.raw_span(1, 2) == c.raw_span(0, 2) == Span(start=0, end=2)
+    assert c.raw_span(2, 3) == Span(start=2, end=3)
+
+
+def test_raw_span_of_ligature_with_accent_after_normalization():
+    (chunk,) = split_document("d", "\ufb01\u0301x")
+    assert chunk.text == "f\u00edx"
+    assert chunk.raw_span(0, 1) == Span(start=0, end=2)

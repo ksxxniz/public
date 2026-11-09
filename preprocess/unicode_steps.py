@@ -1,12 +1,13 @@
-"""③ 유니코드 정규화 단계 6개. normalize.STEPS 에 이 순서대로 들어간다.
+"""③ 유니코드 정규화 단계 7개. normalize.STEPS 에 이 순서대로 들어간다.
 
   1. decode_tag_chars   태그 문자 해독        → tag_chars_decoded, decoded_segments
-  2. remove_bidi        양방향 제어문자 제거   → bidi_removed
-  3. remove_invisible   보이지 않는 문자 제거  → zero_width_removed, hangul_filler_removed,
+  2. decode_variation_selectors  변형 선택자로 숨긴 바이트 해독 → decoded_segments
+  3. remove_bidi        양방향 제어문자 제거   → bidi_removed
+  4. remove_invisible   보이지 않는 문자 제거  → zero_width_removed, hangul_filler_removed,
                                                   variation_selector_removed, emoji_zwj
-  4. apply_nfkc         NFKC (호환 자모는 건드리지 않음) → nfkc_changed
-  5. assemble_jamo      쪼갠 자모 조립 (ㄱㅗㅇㄱㅕㄱ → 공격) → jamo_assembled
-  6. tidy_whitespace    줄바꿈·공백 정리 (기록 안 함, 의심 신호가 아님)
+  5. apply_nfkc         NFKC (호환 자모는 건드리지 않음) → nfkc_changed
+  6. assemble_jamo      쪼갠 자모 조립 (ㄱㅗㅇㄱㅕㄱ → 공격) → jamo_assembled
+  7. tidy_whitespace    줄바꿈·공백 정리 (기록 안 함, 의심 신호가 아님)
 
 순서가 중요하다. 태그 문자와 양방향 제어문자도 유니코드 분류가 Cf(형식 문자)라서,
 3번의 "Cf 는 지운다" 규칙이 먼저 돌면 태그 문자는 해독 전에 사라지고 양방향 제어문자는
@@ -16,8 +17,10 @@
 
 import re
 import unicodedata
+from itertools import accumulate
 
-from preprocess.context import Context
+from preprocess.context import MAX_DOCUMENT_CHARS, Context, DocumentTooLongError
+from preprocess.encoding import _acceptable, _bytes_text
 from preprocess.tracked import Edit
 
 # ── 1. 태그 문자 ──
@@ -40,6 +43,7 @@ def _is_skippable(ch: str) -> bool:
         ch in _BIDI
         or ch in _HANGUL_FILLERS
         or _is_variation_selector(ch)
+        or _is_extra_invisible(ch)
         or unicodedata.category(ch) == "Cf"
     )
 
@@ -90,6 +94,39 @@ def decode_tag_chars(ctx: Context) -> None:
     )
 
 
+MIN_SELECTOR_BYTES = 3
+
+
+def _selector_byte(ch: str) -> int | None:
+    cp = ord(ch)
+    if 0xFE00 <= cp <= 0xFE0F:
+        return cp - 0xFE00
+    if 0xE0100 <= cp <= 0xE01EF:
+        return cp - 0xE0100 + 16
+    return None
+
+
+def decode_variation_selectors(ctx: Context) -> None:
+    tt = ctx.tt
+    text = tt.text
+    i = 0
+    while i < len(text):
+        if _selector_byte(text[i]) is None:
+            i += 1
+            continue
+        j = i
+        while j < len(text) and _selector_byte(text[j]) is not None:
+            j += 1
+        if j - i >= MIN_SELECTOR_BYTES:
+            data = bytes(b for b in (_selector_byte(c) for c in text[i:j]) if b is not None)
+            decoded = _bytes_text(data)
+            if _acceptable(decoded):
+                if ctx.renormalize is not None:
+                    decoded = ctx.renormalize(decoded)
+                ctx.add_decoded("variation_selector", tt.raw_span(i, j), decoded)
+        i = j
+
+
 # ── 2. 양방향 제어문자 ──
 
 _BIDI = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c")
@@ -111,7 +148,9 @@ _VS15, _VS16 = "\ufe0e", "\ufe0f"
 _KEYCAP = "\u20e3"
 _HANGUL_FILLERS = frozenset("\u3164\u115f\u1160\uffa0")
 # Cf 가 아니라서 분류 규칙으로 안 잡히는 보이지 않는 문자
-_EXTRA_INVISIBLE = frozenset("\u034f")  # COMBINING GRAPHEME JOINER (Mn)
+_EXTRA_INVISIBLE = frozenset("\u034f\u17b4\u17b5\u2065\u2800\U0001d159")
+_INVISIBLE_RANGES = ((0xFFF0, 0xFFF8), (0xE0080, 0xE00FF), (0xE01F0, 0xE0FFF))
+_MONGOLIAN_FVS = frozenset("\u180b\u180c\u180d\u180f")
 
 # 이모지 범위 (근사치). 파이썬 unicodedata 에는 Extended_Pictographic 속성이 없다
 _PICTO_RANGES = (
@@ -120,6 +159,8 @@ _PICTO_RANGES = (
     (0x2300, 0x23FF),
     (0x2B00, 0x2BFF),
     (0x2190, 0x21FF),
+    (0x25FB, 0x25FE),
+    (0x2934, 0x2935),
 )
 _PICTO_SINGLES = frozenset(
     "\u00a9\u00ae\u203c\u2049\u2122\u2139\u3030\u303d\u3297\u3299\u24c2\u25aa\u25ab\u25b6\u25c0"
@@ -133,7 +174,16 @@ def _is_picto(ch: str) -> bool:
 
 def _is_variation_selector(ch: str) -> bool:
     cp = ord(ch)
-    return 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF
+    return 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF or ch in _MONGOLIAN_FVS
+
+
+def _is_extra_invisible(ch: str) -> bool:
+    cp = ord(ch)
+    if cp < 0xA0:
+        return (cp < 0x20 or cp >= 0x7F) and not ch.isspace()
+    return ch in _EXTRA_INVISIBLE or (
+        cp >= 0xFFF0 and any(a <= cp <= b for a, b in _INVISIBLE_RANGES)
+    )
 
 
 def _prev_picto(text: str, i: int) -> bool:
@@ -155,6 +205,8 @@ def remove_invisible(ctx: Context) -> None:
     edits: list[Edit] = []
     kinds: list[str | None] = []
     for i, ch in enumerate(text):
+        if " " <= ch <= "~" or "\uac00" <= ch <= "\ud7a3":
+            continue
         nxt = text[i + 1] if i + 1 < len(text) else ""
         if ch == _ZWJ:
             kind = "emoji_zwj" if _prev_picto(text, i) and nxt and _is_picto(nxt) else None
@@ -167,7 +219,7 @@ def remove_invisible(ctx: Context) -> None:
                 (prev and _is_picto(prev)) or (prev in "0123456789#*" and prev and nxt == _KEYCAP)
             )
             kind = None if normal_emoji else "variation_selector_removed"
-        elif ch in _EXTRA_INVISIBLE or unicodedata.category(ch) == "Cf":
+        elif _is_extra_invisible(ch) or unicodedata.category(ch) == "Cf":
             kind = "zero_width_removed"
         else:
             continue
@@ -189,6 +241,9 @@ def remove_invisible(ctx: Context) -> None:
 def _is_conjoining_jamo(ch: str) -> bool:
     cp = ord(ch)
     return 0x1100 <= cp <= 0x11FF or 0xA960 <= cp <= 0xA97F or 0xD7B0 <= cp <= 0xD7FF
+
+
+_CONJOINING = re.compile("[\u1100-\u11ff\ua960-\ua97f\ud7b0-\ud7ff]")
 
 
 def _is_jamo_letter(ch: str) -> bool:
@@ -230,6 +285,54 @@ def _build_stray_to_compat() -> dict[str, str]:
 
 
 _STRAY_TO_COMPAT = _build_stray_to_compat()
+_OLD_JAMO = re.compile(
+    "[\u1113-\u115e\u1176-\u11a7\u11c3-\u11ff\ua960-\ua97c\ud7b0-\ud7c6\ud7cb-\ud7fb]"
+)
+_HANGUL_JOINS = frozenset(
+    {
+        ("L", "L"),
+        ("L", "V"),
+        ("L", "LV"),
+        ("L", "LVT"),
+        ("LV", "V"),
+        ("LV", "T"),
+        ("V", "V"),
+        ("V", "T"),
+        ("LVT", "T"),
+        ("T", "T"),
+    }
+)
+
+
+def _hangul_type(ch: str) -> str:
+    cp = ord(ch)
+    if 0x1100 <= cp <= 0x115F or 0xA960 <= cp <= 0xA97C:
+        return "L"
+    if 0x1160 <= cp <= 0x11A7 or 0xD7B0 <= cp <= 0xD7C6:
+        return "V"
+    if 0x11A8 <= cp <= 0x11FF or 0xD7CB <= cp <= 0xD7FB:
+        return "T"
+    if 0xAC00 <= cp <= 0xD7A3:
+        return "LVT" if (cp - 0xAC00) % 28 else "LV"
+    return ""
+
+
+def _old_hangul_mask(text: str) -> list[bool]:
+    mask = [False] * len(text)
+    if not _OLD_JAMO.search(text):
+        return mask
+    types = [_hangul_type(c) for c in text]
+    i = 0
+    while i < len(text):
+        j = i + 1
+        while j < len(text) and (types[j - 1], types[j]) in _HANGUL_JOINS:
+            j += 1
+        block = types[i:j]
+        syllable = block[0] in ("L", "LV", "LVT") and any(t in ("V", "LV", "LVT") for t in block)
+        if syllable and _OLD_JAMO.search(text, i, j):
+            mask[i:j] = [True] * (j - i)
+        i = j
+    return mask
 
 
 def _nfkc(s: str) -> str:
@@ -293,6 +396,12 @@ def apply_nfkc(ctx: Context) -> None:
     text = ctx.tt.text
     if unicodedata.is_normalized("NFKC", text) and not _STRAY_JAMO.search(text):
         return
+    size = len(_nfkc(text))
+    if size > MAX_DOCUMENT_CHARS:
+        raise DocumentTooLongError(
+            f"NFKC 정규화로 문서가 {size}자로 늘어나 상한 {MAX_DOCUMENT_CHARS}자를 넘습니다. "
+            "문서를 나눠서 넣어 주세요"
+        )
 
     edits = []
     for s, e, is_jamo in _split_jamo_runs(text):
@@ -301,16 +410,31 @@ def apply_nfkc(ctx: Context) -> None:
                 if text[i] in _HALFWIDTH_TO_COMPAT:
                     edits.append(Edit(i, i + 1, _HALFWIDTH_TO_COMPAT[text[i]]))
             continue
-        for ss, se in _nfkc_segments(text[s:e], base=s):
+        segments = _nfkc_segments(text[s:e], base=s)
+        outs = []
+        pending = []
+        for ss, se in segments:
             seg = text[ss:se]
             new = _nfkc(seg)
-            if not any(_is_conjoining_jamo(c) for c in seg):
+            if _CONJOINING.search(seg):
+                pending.append(len(outs))
+            elif _CONJOINING.search(new):
                 # ㈀ → (ᄀ) 처럼 조합형 자모가 새로 생기면 호환 자모로 되돌린다 → (ㄱ)
                 new = "".join(_TO_COMPAT_JAMO.get(c, c) for c in new)
-            else:
-                # NFKC 뒤에도 남은 현대 조합형 자모는 음절을 못 이룬 '홀로 남은' 자모다.
-                # 호환 자모로 바꿔야 ᄆㅜᄉㅣ·ㅁᅮㅅᅵ 처럼 섞어 쓴 우회를 assemble_jamo 가 조립한다
-                new = "".join(_STRAY_TO_COMPAT.get(c, c) for c in new)
+            outs.append(new)
+        if pending:
+            old = _old_hangul_mask("".join(outs))
+            offsets = list(accumulate(map(len, outs), initial=0))
+            for idx in pending:
+                # NFKC 뒤에도 남은 현대 조합형 자모는 (옛한글 음절에 든 것을 빼면) 음절을 못 이룬
+                # '홀로 남은' 자모다. 호환 자모로 바꿔야 ᄆㅜᄉㅣ·ㅁᅮㅅᅵ 처럼 섞어 쓴 우회를
+                # assemble_jamo 가 조립한다
+                outs[idx] = "".join(
+                    c if old[offsets[idx] + k] else _STRAY_TO_COMPAT.get(c, c)
+                    for k, c in enumerate(outs[idx])
+                )
+        for (ss, se), new in zip(segments, outs, strict=True):
+            seg = text[ss:se]
             if new != seg:
                 # 여러 글자 묶음(결합 문자 등)은 길이가 같아도 글자끼리 짝이 맞지 않을 수 있다.
                 # (Ⅻ̈́ → XIḮ, 결합 문자 순서 정렬) 이때는 묶음 전체를 가리키게 한다

@@ -1,3 +1,4 @@
+import codecs
 import colorsys
 import html
 import inspect
@@ -8,7 +9,7 @@ from bisect import bisect_left
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
-from html.parser import HTMLParser
+from html.parser import HTMLParser, attrfind_tolerant, tagfind_tolerant
 
 BLOCK_TAGS = frozenset(
     "address article aside blockquote br dd div dl dt figcaption figure footer form h1 h2 h3 h4 "
@@ -47,6 +48,37 @@ _TABLE_PARTS = frozenset("caption col colgroup tbody td tfoot th thead tr".split
 _TABLE_CONTEXT = frozenset("table tbody tfoot thead tr".split())
 _TABLE_CONTENT = _TABLE_PARTS | frozenset("form input script style template".split())
 _SVG_TEXT = frozenset("text tspan textpath".split())
+ATTRIBUTE_REASONS = {"alt": "attr_alt", "title": "attr_title", "aria-label": "attr_aria_label"}
+_META_NAME = re.compile(r"(?:^|[:.])(?:description|keywords|title|summary|abstract|subject)$")
+_REF_START = r"&(?=#(?:[0-9]+|[xX][0-9a-fA-F]+)[^0-9a-fA-F]|[a-zA-Z][-.a-zA-Z0-9]*[^a-zA-Z0-9])"
+_INTERESTING = re.compile("<|" + _REF_START)
+_XML_DECL = re.compile(
+    r"xml\s+version\s*=\s*([\"'])1\.[0-9]\1"
+    r"(?:\s+encoding\s*=\s*([\"'])([A-Za-z][\w.:-]*)\2)?"
+    r"(?:\s+standalone\s*=\s*([\"'])(?:yes|no)\4)?\s*\??"
+)
+_DOCTYPE = re.compile(
+    r"doctype\s+html"
+    r"(?:\s+public\s+([\"'])-//(?:W3C|IETF)//DTD X?HTML(?:\+RDFa)? [0-9.]+"
+    r"(?: (?:Strict|Transitional|Frameset|Final|Basic|Mobile|Level [0-9]))*//EN\1"
+    r"(?:\s+([\"'])https?://www\.w3\.org/(?:TR|MarkUp)(?:/(?:DTD|html4|xhtml1|xhtml11|"
+    r"xhtml-basic|xhtml-basic1[01]|xhtml-rdfa-1|loose|strict|frameset|"
+    r"xhtml1-(?:strict|transitional|frameset)))+\.dtd\2)?"
+    r"|\s+system\s+([\"'])about:legacy-compat\3)?\s*",
+    re.I,
+)
+_BGCOLOR_TAGS = frozenset("body table thead tbody tfoot tr td th marquee".split())
+_STYLE_OPEN = re.compile(r"<style(?=[\s/>])", re.I)
+_SIMPLE_SELECTOR = re.compile(r"(\*|[A-Za-z][\w-]*)?((?:[.#][\w-]+)*)")
+_SELECTOR_PART = re.compile(r"[.#][\w-]+")
+_GROUPING_RULES = ("media", "supports", "layer", "container", "document")
+_URL_ATTRIBUTES = frozenset(
+    "href src action formaction cite data poster background longdesc ping srcset".split()
+)
+_PLACEHOLDER = re.compile(r"\{[^{}]*\}|\[[^\[\]]*\]|<[^<>]*>|%s|\$\w+")
+_QUERY_VALUE = re.compile(r"[?&#][^=&#]*=([^&#]*)")
+_BARE_HEX = re.compile(r"[0-9a-fA-F]{6}")
+_HINT_VALUE = re.compile(r"#?[\w(),.% ]{1,64}")
 
 SAME_COLOR_CONTRAST = 1.2
 MIN_OPACITY = 0.05
@@ -54,6 +86,12 @@ TINY_FONT_PX = 1.0
 TINY_BOX_PX = 1.0
 OFFSCREEN_PX = -999.0
 MAX_ACTIVE_FORMATTING = 64
+MAX_STYLE_RULES = 2000
+MAX_RULES_PER_KEY = 32
+MAX_CLASSES = 16
+MAX_STYLE_CHECKS = 3_000_000
+MAX_CSS_NESTING = 8
+LONG_QUERY_VALUE = 32
 _OFFSCREEN_PROPS = ("left", "top", "text-indent", "margin-left", "margin-top")
 
 Color = tuple[float, float, float, float]
@@ -136,6 +174,9 @@ class ParsedHtml:
     raw: str
     pieces: list[Piece] = field(default_factory=list)
     breaks: list[int] = field(default_factory=list)
+    attributes: list[Piece] = field(default_factory=list)
+    url_values: list[Piece] = field(default_factory=list)
+    marks: list[Piece] = field(default_factory=list)
 
     @property
     def hidden_pieces(self) -> list[Piece]:
@@ -176,9 +217,13 @@ def html5_parser_available() -> bool:
     return "scripting" in params and "iframe" in HTMLParser.CDATA_CONTENT_ELEMENTS
 
 
+class HtmlParserUnavailableError(RuntimeError):
+    pass
+
+
 def _require_html5_parser() -> None:
     if not html5_parser_available():
-        raise RuntimeError(
+        raise HtmlParserUnavailableError(
             f"HTML 파서에는 Python 3.11.15 이상이 필요합니다 (지금 {platform.python_version()}). "
             "그 전 버전의 html.parser 는 같은 문서를 다르게 읽어 결과가 달라집니다. "
             "uv python install 3.11.15 로 설치하고 .venv 폴더를 지운 뒤 uv sync 를 하세요."
@@ -200,14 +245,14 @@ class _Style:
 ROOT = _Style()
 
 
-def _element_style(tag: str, attrs, parent: _Style) -> _Style:
-    return _element_style_cached(tag, tuple(attrs), parent)
+def _element_style(tag: str, attrs, parent: _Style, sheet: str = "") -> _Style:
+    return _element_style_cached(tag, tuple(attrs), parent, sheet)
 
 
 @lru_cache(maxsize=8192)
-def _element_style_cached(tag: str, attrs: tuple, parent: _Style) -> _Style:
+def _element_style_cached(tag: str, attrs: tuple, parent: _Style, sheet: str = "") -> _Style:
     attr = _first_attrs(attrs)
-    style = _parse_style(attr.get("style") or "")
+    style = _parse_style(_with_hints(tag, attr, sheet))
     font_px = _font_size(style.get("font-size"), parent.font_px)
     color = _color_value(style.get("color"), parent.color)
     svg = (parent.svg or tag == "svg") and tag != "foreignobject"
@@ -221,6 +266,33 @@ def _element_style_cached(tag: str, attrs: tuple, parent: _Style) -> _Style:
         svg=svg,
         svg_text=svg and (parent.svg_text or tag in _SVG_TEXT),
     )
+
+
+def _with_hints(tag: str, attr: dict[str, str], sheet: str = "") -> str:
+    hints = [
+        f"{prop}:{color}"
+        for prop, name in _hint_attrs(tag)
+        if (color := _legacy_color(attr.get(name) or "")) is not None
+    ]
+    return ";".join([*hints, sheet, attr.get("style") or ""])
+
+
+def _hint_attrs(tag: str) -> list[tuple[str, str]]:
+    out = []
+    if tag == "font":
+        out.append(("color", "color"))
+    if tag == "body":
+        out.append(("color", "text"))
+    if tag in _BGCOLOR_TAGS:
+        out.append(("background-color", "bgcolor"))
+    return out
+
+
+def _legacy_color(value: str) -> str | None:
+    value = value.strip()
+    if not _HINT_VALUE.fullmatch(value):
+        return None
+    return "#" + value if _BARE_HEX.fullmatch(value) else value
 
 
 @lru_cache(maxsize=8192)
@@ -297,6 +369,21 @@ class _Parser(HTMLParser):
         self._at: dict[str, list[int]] = defaultdict(list)
         self._specials: list[int] = []
         self._listed: Counter[str] = Counter()
+        self._sheet = _StyleSheet(raw)
+
+    def reset(self):
+        super().reset()
+        self.interesting = _INTERESTING
+
+    def clear_cdata_mode(self):
+        super().clear_cdata_mode()
+        self.interesting = _INTERESTING
+
+    def set_cdata_mode(self, elem, *, escapable=False):
+        super().set_cdata_mode(elem, escapable=escapable)
+        if escapable:
+            end = r"|</%s(?=[\t\n\r\f />])" % re.escape(self.cdata_elem)
+            self.interesting = re.compile(_REF_START + end, re.IGNORECASE | re.ASCII)
 
     def _pos(self) -> int:
         line, col = self.getpos()
@@ -391,9 +478,12 @@ class _Parser(HTMLParser):
         for j in range(i, len(f)):
             old = f[j]
             parent = self._current_style(foster=True)
-            node = _Node(old.tag, _element_style(old.tag, old.attrs, parent), old.attrs)
+            node = _Node(old.tag, self._style_of(old.tag, old.attrs, parent), old.attrs)
             self._push(node)
             f[j] = node
+
+    def _style_of(self, tag: str, attrs: tuple, parent: _Style) -> _Style:
+        return _element_style(tag, attrs, parent, self._sheet.declarations(tag, attrs))
 
     def _current_style(self, foster: bool) -> _Style:
         if foster and self._top() in _TABLE_CONTEXT and self._at["table"]:
@@ -402,10 +492,48 @@ class _Parser(HTMLParser):
         return self._stack[-1].style if self._stack else ROOT
 
     def handle_starttag(self, tag, attrs):
+        self._attribute_text(tag, attrs)
         self._start(tag, attrs, self_closing=False)
 
     def handle_startendtag(self, tag, attrs):
+        self._attribute_text(tag, attrs)
         self._start(tag, attrs, self_closing=True)
+
+    def _attribute_text(self, tag, attrs) -> None:
+        wanted = _wanted_attributes(tag, attrs)
+        if not wanted and not any(_url_like(name) for name, _ in attrs):
+            return
+        tag_text = self.get_starttag_text() or ""
+        base = self._pos()
+        if self.raw[base : base + len(tag_text)] != tag_text:
+            return
+        m = tagfind_tolerant.match(tag_text, 1)
+        k = m.end() if m else len(tag_text)
+        seen: set[str] = set()
+        while k < len(tag_text):
+            a = attrfind_tolerant.match(tag_text, k)
+            if not a or a.end() <= k:
+                break
+            k = a.end()
+            name = a.group(1).lower()
+            if name in seen:
+                continue
+            seen.add(name)
+            if a.group(3) is None or (name not in wanted and not _url_like(name)):
+                continue
+            s, e = a.span(3)
+            if e - s >= 2 and tag_text[s] in "'\"" and tag_text[e - 1] == tag_text[s]:
+                s, e = s + 1, e - 1
+            if not tag_text[s:e].strip():
+                continue
+            if name in wanted:
+                pieces = _value_pieces(self.raw, base + s, base + e, wanted[name])
+                self.result.attributes.extend(pieces)
+            else:
+                value = html.unescape(tag_text[s:e])
+                self.result.url_values.append(Piece(base + s, base + e, value, name))
+                if tag == "img" and name == "src" and exfil_url(value):
+                    self.result.marks.append(Piece(base + s, base + e, value, "exfil_image"))
 
     def _start(self, tag, attrs, self_closing: bool) -> None:
         if tag in _TABLE_PARTS and self._find({"table"}, _TABLE_SCOPE) is None:
@@ -421,7 +549,7 @@ class _Parser(HTMLParser):
         if self_closing and (parent.svg or tag == "svg"):
             return
         attrs = tuple(attrs)
-        node = _Node(tag, _element_style(tag, attrs, parent), attrs)
+        node = _Node(tag, self._style_of(tag, attrs, parent), attrs)
         self._push(node)
         if tag in _FORMATTING:
             self._remember(node)
@@ -538,8 +666,252 @@ class _Parser(HTMLParser):
 
     def handle_comment(self, data):
         tag_start = self._pos()
-        start = self.raw.find(data, tag_start) if data else tag_start
-        self.result.pieces.append(Piece(start, start + len(data), data, "comment"))
+        after = tag_start + (4 if self.raw.startswith("<!--", tag_start) else 2)
+        start = self.raw.find(data, after) if data else after
+        if start >= 0:
+            self.result.pieces.append(Piece(start, start + len(data), data, "comment"))
+
+    def unknown_decl(self, data):
+        start = self._pos() + 3
+        if data[:6].lower() != "cdata[":
+            self._markup_text(start, data, "comment")
+            return
+        content = data[6:]
+        if not data.startswith("CDATA[") and content.endswith("]"):
+            content = content[:-1]
+        self._markup_text(start + 6, content, "cdata")
+
+    def handle_pi(self, data):
+        if not _benign_pi(data):
+            self._markup_text(self._pos() + 2, data, "comment")
+
+    def handle_decl(self, decl):
+        if not _DOCTYPE.fullmatch(decl):
+            self._markup_text(self._pos() + 2, decl, "comment")
+
+    def _markup_text(self, start: int, text: str, reason: str) -> None:
+        if text and self.raw.startswith(text, start):
+            self.result.pieces.append(Piece(start, start + len(text), text, reason))
+
+
+def _benign_pi(data: str) -> bool:
+    m = _XML_DECL.fullmatch(data)
+    if m is None:
+        return False
+    try:
+        codecs.lookup(m.group(3) or "utf-8")
+    except LookupError:
+        return False
+    return True
+
+
+def _url_like(name: str) -> bool:
+    return name in _URL_ATTRIBUTES or name.startswith("data-")
+
+
+def exfil_url(url: str) -> bool:
+    url = url.strip()
+    if not url.lower().startswith(("http://", "https://", "//")):
+        return False
+    if _PLACEHOLDER.search(url):
+        return True
+    return any(len(v) >= LONG_QUERY_VALUE for v in _QUERY_VALUE.findall(url))
+
+
+@dataclass(frozen=True)
+class _Rule:
+    specificity: tuple[int, int, int]
+    order: int
+    tag: str | None
+    ident: str | None
+    classes: frozenset[str]
+    key: str
+    body: str
+
+
+class _StyleSheet:
+    def __init__(self, raw: str):
+        self.by_key: dict[str, list[_Rule]] = defaultdict(list)
+        self.checks = 0
+        self._memo: dict[tuple, str] = {}
+        count = 0
+        for css in _style_blocks(raw):
+            for prelude, body in _css_rules(css):
+                for sel in prelude.split(","):
+                    rule = _selector_rule(sel.strip(), count, body)
+                    if rule is None:
+                        continue
+                    self._add(rule)
+                    count += 1
+                    if count >= MAX_STYLE_RULES:
+                        return
+
+    def _add(self, rule: _Rule) -> None:
+        bucket = self.by_key[rule.key]
+        if len(bucket) < MAX_RULES_PER_KEY:
+            bucket.append(rule)
+            return
+        if not _rule_hides(rule):
+            return
+        for i, old in enumerate(bucket):
+            if not _rule_hides(old):
+                del bucket[i]
+                bucket.append(rule)
+                return
+
+    def declarations(self, tag: str, attrs) -> str:
+        if not self.by_key:
+            return ""
+        attrs = tuple(attrs)
+        key = (tag, attrs)
+        if key in self._memo:
+            return self._memo[key]
+        attr = _first_attrs(attrs)
+        classes = frozenset(list(dict.fromkeys((attr.get("class") or "").split()))[:MAX_CLASSES])
+        ident = (attr.get("id") or "").strip()
+        keys = [tag, "*", *("." + c for c in classes)]
+        if ident:
+            keys.append("#" + ident)
+        matched: list[_Rule] = []
+        for k in keys:
+            for rule in self.by_key.get(k, ()):
+                self.checks += 1
+                if rule.tag not in (None, tag) or not rule.classes <= classes:
+                    continue
+                if rule.ident is not None and rule.ident != ident:
+                    continue
+                matched.append(rule)
+        if self.checks > MAX_STYLE_CHECKS:
+            self.by_key.clear()
+        matched.sort(key=lambda r: (r.specificity, r.order))
+        out = ";".join(r.body for r in matched)
+        if len(self._memo) > 8192:
+            self._memo.clear()
+        self._memo[key] = out
+        return out
+
+
+def _rule_hides(rule: _Rule) -> bool:
+    return _text_reason(_element_style("span", (("style", rule.body),), ROOT)) is not None
+
+
+def _selector_rule(sel: str, order: int, body: str) -> _Rule | None:
+    m = _SIMPLE_SELECTOR.fullmatch(sel)
+    if not sel or m is None:
+        return None
+    tag = m.group(1).lower() if m.group(1) and m.group(1) != "*" else None
+    parts = _SELECTOR_PART.findall(m.group(2))
+    ids = {p[1:] for p in parts if p[0] == "#"}
+    classes = frozenset(p[1:] for p in parts if p[0] == ".")
+    if len(ids) > 1:
+        return None
+    ident = next(iter(ids)) if ids else None
+    if ident is not None:
+        key = "#" + ident
+    elif classes:
+        key = "." + min(classes)
+    else:
+        key = tag or "*"
+    spec = (len(ids), len(classes), 1 if tag else 0)
+    return _Rule(spec, order, tag, ident, classes, key, body)
+
+
+def _style_blocks(raw: str):
+    lower = raw.lower()
+    pos = 0
+    while True:
+        m = _STYLE_OPEN.search(raw, pos)
+        if m is None:
+            return
+        gt = raw.find(">", m.end())
+        if gt < 0:
+            return
+        end = lower.find("</style", gt + 1)
+        yield raw[gt + 1 : len(raw) if end < 0 else end]
+        if end < 0:
+            return
+        pos = end + 7
+
+
+def _strip_css_comments(css: str) -> str:
+    out = []
+    pos = 0
+    while True:
+        start = css.find("/*", pos)
+        if start < 0:
+            out.append(css[pos:])
+            return "".join(out)
+        out.append(css[pos:start])
+        end = css.find("*/", start + 2)
+        if end < 0:
+            return "".join(out)
+        pos = end + 2
+
+
+def _css_rules(css: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    todo = [(_strip_css_comments(css), 0)]
+    while todo and len(out) < MAX_STYLE_RULES:
+        text, depth = todo.pop()
+        found: list[tuple[str, str]] = []
+        nested: list[str] = []
+        i = 0
+        while i < len(text):
+            brace = text.find("{", i)
+            if brace < 0:
+                break
+            semi = text.rfind(";", i, brace)
+            start = semi + 1 if semi >= 0 else i
+            close = _matching_brace(text, brace)
+            prelude = text[start:brace].rsplit("}", 1)[-1].strip()
+            body = text[brace + 1 : close]
+            if prelude.startswith("@"):
+                name = prelude[1:].split(None, 1)[0].lower() if len(prelude) > 1 else ""
+                if name in _GROUPING_RULES and depth < MAX_CSS_NESTING:
+                    nested.append(body)
+            elif "{" not in body:
+                found.append((prelude, body))
+            i = close + 1
+        out.extend(found)
+        todo.extend((body, depth + 1) for body in reversed(nested))
+    return out[:MAX_STYLE_RULES]
+
+
+def _matching_brace(text: str, brace: int) -> int:
+    depth = 0
+    for i in range(brace, len(text)):
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(text)
+
+
+def _wanted_attributes(tag: str, attrs) -> dict[str, str]:
+    attr = _first_attrs(attrs)
+    wanted = {name: why for name, why in ATTRIBUTE_REASONS.items() if attr.get(name, "").strip()}
+    meta_name = (attr.get("name") or attr.get("property") or "").strip().lower()
+    if tag == "meta" and _META_NAME.search(meta_name):
+        wanted["content"] = "meta_content"
+    if tag == "input" and (attr.get("type") or "").strip().lower() == "hidden":
+        wanted["value"] = "input_hidden"
+    return wanted
+
+
+def _value_pieces(raw: str, start: int, end: int, reason: str) -> list[Piece]:
+    out: list[Piece] = []
+    pos = start
+    for m in _ENTITY.finditer(raw, start, end):
+        if m.start() > pos:
+            out.append(Piece(pos, m.start(), raw[pos : m.start()], reason))
+        out.append(Piece(m.start(), m.end(), html.unescape(m.group()), reason))
+        pos = m.end()
+    if pos < end:
+        out.append(Piece(pos, end, raw[pos:end], reason))
+    return out
 
 
 def _first_attrs(attrs) -> dict[str, str]:

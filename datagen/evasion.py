@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from common import config
-from preprocess.homoglyph import SUPPLEMENT, VISUAL_CONFUSABLE
+from preprocess.homoglyph import KEYWORDS, SUPPLEMENT, VISUAL_CONFUSABLE
 
 CONCEALMENT = {
     "encoding": "인코딩",
@@ -172,6 +172,25 @@ def url_encode(text, rng):
     return "".join(f"%{b:02X}" for b in text.encode("utf-8"))
 
 
+def html_entity(text, rng):
+    if not any(c.isalnum() for c in text):
+        return None
+    picks = [c.isalnum() and rng.random() < 0.5 for c in text]
+    if not any(picks):
+        picks[next(i for i, c in enumerate(text) if c.isalnum())] = True
+    return "".join(
+        (f"&#{ord(c)};" if rng.random() < 0.5 else f"&#x{ord(c):x};") if pick else c
+        for c, pick in zip(text, picks, strict=True)
+    )
+
+
+def unicode_escape(text, rng):
+    if not text:
+        return None
+    units = text.encode("utf-16-be")
+    return "".join(f"\\u{units[i]:02x}{units[i + 1]:02x}" for i in range(0, len(units), 2))
+
+
 def rot13(text, rng):
     if not re.search("[A-Za-z]", text) or not text.isascii():
         return None
@@ -203,6 +222,35 @@ def html_comment(text, rng):
     return f"<!-- {_comment_safe(text)} -->"
 
 
+def cyrillic_keyword(text, rng):
+    def swap(m: re.Match[str]) -> str:
+        word = m.group()
+        if word.lower() not in KEYWORDS or not all(c in _LOOKALIKES for c in word):
+            return word
+        return "".join(_LOOKALIKES[c][0] for c in word)
+
+    out = re.sub(r"[A-Za-z]+", swap, text)
+    return out if out != text else None
+
+
+def variation_selector_bytes(text, rng):
+    data = text.encode("utf-8")
+    return "\U0001f600" + "".join(
+        chr(0xFE00 + b) if b < 16 else chr(0xE0100 + b - 16) for b in data
+    )
+
+
+def css_class_hidden(text, rng):
+    return (
+        "<style>.note-x{display:none}</style>"
+        f'<div class="note-x">{html.escape(text, quote=False)}</div>'
+    )
+
+
+def attribute_base64(text, rng):
+    return f'<a href="https://example.com/r?ref={b64(text, rng)}">link</a>'
+
+
 def md_comment(text, rng):
     if ")" in text or "\n" in text:
         return None
@@ -222,18 +270,24 @@ TECHNIQUES: dict[str, Technique] = {
         Technique("jamo_split", "unicode", "③", True, "char", jamo_split),
         Technique("homoglyph", "unicode", "④", True, "char", homoglyph),
         Technique("small_caps", "unicode", "④", True, "char", small_caps),
+        Technique("cyrillic_keyword", "unicode", "④", True, "char", cyrillic_keyword),
+        Technique("variation_selector", "unicode", "③", True, "payload", variation_selector_bytes),
         Technique("tag_chars", "unicode", "③", True, "payload", tag_chars),
-        Technique("base64", "encoding", "⑤", False, "payload", b64),
-        Technique("base64_double", "encoding", "⑤", False, "payload", lambda t, r: b64(t, r, 2)),
-        Technique("base64_triple", "encoding", "⑤", False, "payload", lambda t, r: b64(t, r, 3)),
-        Technique("hex", "encoding", "⑤", False, "payload", hex_encode),
-        Technique("url", "encoding", "⑤", False, "payload", url_encode),
-        Technique("rot13", "encoding", "⑤", False, "payload", rot13),
-        Technique("white_text", "visual", "②", False, "doc", white_text, "html"),
-        Technique("font_size_zero", "visual", "②", False, "doc", font_size_zero, "html"),
-        Technique("display_none", "visual", "②", False, "doc", display_none, "html"),
-        Technique("html_comment", "visual", "②", False, "doc", html_comment, "html"),
-        Technique("md_comment", "visual", "②", False, "doc", md_comment, "md"),
+        Technique("base64", "encoding", "⑤", True, "payload", b64),
+        Technique("base64_double", "encoding", "⑤", True, "payload", lambda t, r: b64(t, r, 2)),
+        Technique("base64_triple", "encoding", "⑤", True, "payload", lambda t, r: b64(t, r, 3)),
+        Technique("hex", "encoding", "⑤", True, "payload", hex_encode),
+        Technique("url", "encoding", "⑤", True, "payload", url_encode),
+        Technique("rot13", "encoding", "⑤", True, "payload", rot13),
+        Technique("html_entity", "encoding", "⑤", True, "char", html_entity),
+        Technique("unicode_escape", "encoding", "⑤", True, "payload", unicode_escape),
+        Technique("attribute_base64", "encoding", "⑤", True, "doc", attribute_base64, "html"),
+        Technique("white_text", "visual", "②", True, "doc", white_text, "html"),
+        Technique("font_size_zero", "visual", "②", True, "doc", font_size_zero, "html"),
+        Technique("display_none", "visual", "②", True, "doc", display_none, "html"),
+        Technique("html_comment", "visual", "②", True, "doc", html_comment, "html"),
+        Technique("css_class", "visual", "②", True, "doc", css_class_hidden, "html"),
+        Technique("md_comment", "visual", "②", True, "doc", md_comment, "md"),
     ]
 }
 HTML_TECHNIQUES = ("white_text", "font_size_zero", "display_none", "html_comment")
@@ -590,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list:
         for t in TECHNIQUES.values():
-            state = "구현" if t.ready else "3주차 예정"
+            state = "구현" if t.ready else "미구현"
             print(f"{t.name:18} {CONCEALMENT[t.concealment]:8} 단계 {t.stage}  {state}")
         return 0
 

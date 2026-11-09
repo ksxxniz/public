@@ -7,6 +7,7 @@ from pathlib import Path
 
 from common import config
 from datagen.evasion import CONCEALMENT, DEMO_SAMPLES, TECHNIQUES, _read_jsonl, generate
+from preprocess.chunk import with_joined_tags
 from preprocess.normalize import normalize_document, normalize_text
 
 SIGNALS = (
@@ -15,6 +16,7 @@ SIGNALS = (
     "variation_selector_removed",
     "homoglyph_replaced",
     "nfkc_changed",
+    "hidden_text_found",
     "decoded_count",
 )
 
@@ -34,13 +36,14 @@ def revealed(record: dict) -> bool:
         )
     if target in doc.text:
         return True
-    return any(target in normalize_text(seg.decoded) for seg in doc.decoded_segments)
+    segments = with_joined_tags(doc.decoded_segments)
+    return any(target in normalize_text(seg.decoded) for seg in segments)
 
 
 def signals(record: dict) -> Counter:
     doc = normalize_document(record["text"], record.get("fmt", "txt"))
     counts = Counter(ev.kind for ev in doc.events)
-    counts["decoded_count"] = len(doc.decoded_segments)
+    counts["decoded_count"] = len(with_joined_tags(doc.decoded_segments))
     return counts
 
 
@@ -97,7 +100,7 @@ def render(rows: list[Row], benign: dict[str, dict[str, float]]) -> str:
         "|---|---|---|---|---:|---:|---:|",
     ]
     for r in rows:
-        state = "구현" if r.ready else "3주차 예정"
+        state = "구현" if r.ready else "미구현"
         lines.append(
             f"| {r.key} | {CONCEALMENT[r.concealment]} | {r.stage} | {state} "
             f"| {r.total} | {r.shown} | {r.escape_rate:.0%} |"
