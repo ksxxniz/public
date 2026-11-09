@@ -11,11 +11,15 @@ pyproject.toml 에는 아직 없다. 3단계 담당 PC 에서 따로 추가한�
 
 학습 방식
 - 입력은 정리본 (dataset.py 가 normalize_text 를 거쳐 만든다)
+- Base64 등 복원 결과 조각도 학습 샘플로 넣는다 (결정 ⑥, dataset.add_decoded).
+  조각 라벨은 answer 가 들어 있으면 injection. --no-decoded 로 끌 수 있다
 - 길이는 특수 토큰 포함 384 토큰 (결정 ④). 넘는 샘플 수를 시작할 때 알려준다
 - 정상:공격 = 3:1 이라 그냥 학습하면 "전부 정상"으로 게을러진다.
   공격을 틀렸을 때 벌점을 키운다 (가중 손실, 기본값 = 정상 수 / 공격 수)
 - GPU 가 BF16 을 지원하면 BF16 으로 학습한다 (mDeBERTa 는 FP16 이 불안정하다)
 - epoch 마다 val 의 recall · precision · fpr · f1 을 출력하고, f1 이 가장 좋은 epoch 를 저장한다
+  지표는 문서 단위가 기준이다. 한 문서의 본문과 복원 결과 조각 중 가장 높은 점수로 판정한다
+  (최종 판정이 문서 단위라서). 샘플(조각) 하나 기준 지표는 sample_ 을 붙여 함께 남긴다
 
 저장 결과 (--out 폴더): 모델 · 토크나이저 · stage1_meta.json
   stage1_meta.json = model_ver(폴더 이름), 베이스 모델, 정규화 버전, 유니코드 버전,
@@ -31,7 +35,15 @@ from pathlib import Path
 from common.config import CHUNK_SIZE_TOKENS, SEED, WANDB_ENTITY, WANDB_PROJECT, set_seed
 from preprocess.normalize import UNICODE_VERSION
 from preprocess.normalize import VERSION as NORMALIZE_VERSION
-from stage1.dataset import ID2LABEL, LABEL2ID, Example, label_counts, load_jsonl, split_examples
+from stage1.dataset import (
+    ID2LABEL,
+    LABEL2ID,
+    Example,
+    add_decoded,
+    label_counts,
+    load_jsonl,
+    split_examples,
+)
 from stage1.metrics import binary_metrics
 
 META_FILE = "stage1_meta.json"
@@ -53,6 +65,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=SEED)
     p.add_argument("--precision", choices=["auto", "bf16", "fp32"], default="auto")
     p.add_argument("--wandb", action="store_true", help="W&B 에 기록")
+    p.add_argument(
+        "--no-decoded", action="store_true", help="복원 결과 조각을 학습에 넣지 않음 (비교용)"
+    )
     return p.parse_args(argv)
 
 
@@ -67,11 +82,25 @@ def main(argv: list[str] | None = None) -> dict:
         get_linear_schedule_with_warmup,
     )
 
-    train, val = split_examples(load_jsonl(args.data), args.val_ratio, args.seed)
+    examples = load_jsonl(args.data)
+    decoded_stats: dict = {}
+    if not args.no_decoded:
+        examples, decoded_stats = add_decoded(examples)
+        print(
+            f"복원 결과 조각: injection {decoded_stats['decoded_injection']}개, "
+            f"benign {decoded_stats['decoded_benign']}개"
+        )
+        if decoded_stats["skipped_no_answer"]:
+            print(
+                f"경고: answer 가 없는 공격 샘플 {decoded_stats['skipped_no_answer']}개는 "
+                "복원 결과 조각을 만들지 않았습니다"
+            )
+    train, val = split_examples(examples, args.val_ratio, args.seed)
     if not train or not val:
         raise SystemExit(f"데이터가 부족합니다: train {len(train)}개, val {len(val)}개")
     counts = label_counts(train)
     print(f"train {len(train)} {counts} / val {len(val)} {label_counts(val)}")
+    print(f"  본문·복원 조각: train {kind_counts(train)} / val {kind_counts(val)}")
     if min(counts.values()) == 0:
         raise SystemExit("train 에 benign 과 injection 이 모두 있어야 합니다")
     pos_weight = args.pos_weight or counts["benign"] / counts["injection"]
@@ -86,7 +115,7 @@ def main(argv: list[str] | None = None) -> dict:
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
     ).to(device)
-    report_truncation(tokenizer, train + val, args.max_length)
+    report_truncation(tokenizer, [ex for ex in train + val if ex.kind == "body"], args.max_length)
 
     def batches(data: list[Example], shuffle: bool):
         order = torch.randperm(len(data)).tolist() if shuffle else list(range(len(data)))
@@ -126,18 +155,19 @@ def main(argv: list[str] | None = None) -> dict:
             total_loss += loss.item()
 
         scores = predict(model, batches(val, shuffle=False), torch)
-        m = binary_metrics([ex.label_id for ex in val], scores)
+        m = evaluate(val, scores)
         m["train_loss"] = total_loss / steps_per_epoch
         m["epoch_sec"] = time.perf_counter() - t0
         print(
-            f"epoch {epoch}: loss {m['train_loss']:.4f} | recall {m['recall']:.3f} "
-            f"precision {m['precision']:.3f} fpr {m['fpr']:.3f} f1 {m['f1']:.3f}"
+            f"epoch {epoch}: loss {m['train_loss']:.4f} | 문서 recall {m['recall']:.3f} "
+            f"precision {m['precision']:.3f} fpr {m['fpr']:.3f} f1 {m['f1']:.3f} "
+            f"| 샘플 f1 {m['sample_f1']:.3f}"
         )
         if run:
             run.log({f"val/{k}": v for k, v in m.items()}, step=epoch)
         if best is None or m["f1"] > best["f1"]:
             best, best_epoch = m, epoch
-            save(model, tokenizer, args, best, best_epoch, pos_weight, len(train), len(val))
+            save(model, tokenizer, args, best, best_epoch, pos_weight, train, val, decoded_stats)
 
     print(f"가장 좋은 epoch {best_epoch} (val f1 {best['f1']:.3f}) → {args.out}")
     if run:
@@ -157,6 +187,30 @@ def predict(model, batches, torch) -> list[float]:
     return scores
 
 
+def evaluate(data: list[Example], scores: list[float]) -> dict:
+    """문서 단위 지표 (본문·복원 조각 중 최고 점수로 판정) + 샘플 단위 지표 (sample_ 접두)"""
+    sample = binary_metrics([ex.label_id for ex in data], scores)
+    doc_label: dict[str, int] = {}
+    doc_score: dict[str, float] = {}
+    for ex, s in zip(data, scores, strict=True):
+        if ex.kind == "body":
+            doc_label[ex.doc] = ex.label_id
+        doc_score[ex.doc] = max(s, doc_score.get(ex.doc, 0.0))
+    docs = list(doc_label)
+    m = binary_metrics([doc_label[d] for d in docs], [doc_score[d] for d in docs])
+    m.update({f"sample_{k}": v for k, v in sample.items()})
+    m["n_docs"] = float(len(docs))
+    m["n_samples"] = float(len(data))
+    return m
+
+
+def kind_counts(data: list[Example]) -> dict[str, int]:
+    out = {"body": 0, "decoded": 0}
+    for ex in data:
+        out[ex.kind] += 1
+    return out
+
+
 def report_truncation(tokenizer, data: list[Example], max_length: int) -> None:
     """특수 토큰 포함 max_length 를 넘어 잘리는 샘플 수 (데이터 규칙: 샘플은 384 이하)."""
     n_long = sum(1 for ex in data if len(tokenizer(ex.text)["input_ids"]) > max_length)
@@ -164,7 +218,7 @@ def report_truncation(tokenizer, data: list[Example], max_length: int) -> None:
         print(f"경고: {n_long}/{len(data)}개 샘플이 {max_length} 토큰을 넘어 잘립니다")
 
 
-def save(model, tokenizer, args, metrics, epoch, pos_weight, n_train, n_val) -> None:
+def save(model, tokenizer, args, metrics, epoch, pos_weight, train, val, decoded_stats) -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(args.out)
     tokenizer.save_pretrained(args.out)
@@ -185,7 +239,15 @@ def save(model, tokenizer, args, metrics, epoch, pos_weight, n_train, n_val) -> 
             "weight_decay": args.weight_decay,
             "pos_weight": pos_weight,
         },
-        "data": {"path": str(args.data), "n_train": n_train, "n_val": n_val},
+        "decoded": not args.no_decoded,
+        "data": {
+            "path": str(args.data),
+            "n_train": len(train),
+            "n_val": len(val),
+            "train_kinds": kind_counts(train),
+            "val_kinds": kind_counts(val),
+            **decoded_stats,
+        },
         "val_metrics": metrics,
     }
     (args.out / META_FILE).write_text(
@@ -205,6 +267,7 @@ def init_wandb(args, pos_weight: float, counts: dict):
             "pos_weight": pos_weight,
             "train_counts": counts,
             "normalize_version": NORMALIZE_VERSION,
+            "decoded": not args.no_decoded,
         },
     )
 
