@@ -5,6 +5,7 @@ import html
 import re
 import unicodedata
 from collections.abc import Callable
+from heapq import merge
 from urllib.parse import unquote
 
 from preprocess.context import Context, DocumentTooLongError
@@ -82,8 +83,40 @@ _COMMON = frozenset(
 
 def restore_encodings(ctx: Context) -> None:
     text = ctx.tt.text
+    in_text = [
+        (*ctx.tt.raw_span(s, e), method, decoded, depth)
+        for s, e, method, decoded, depth in sorted(find_encodings(text))
+    ]
+    in_attrs: list[tuple[int, int, str, str, int]] = []
+    for start, end, value in ctx.url_values:
+        exact = ctx.tt.raw[start:end] == value
+        for s, e, method, decoded, depth in find_encodings(value):
+            span = (start + s, start + e) if exact else (start, end)
+            in_attrs.append((*span, method, decoded, depth))
+    found = list(merge(in_text, sorted(in_attrs), key=lambda f: f[0]))
+
+    total = len(ctx.decoded_segments) + len(found)
+    if total > MAX_DECODED_SEGMENTS:
+        raise DocumentTooLongError(
+            f"복원 결과가 {total}개로 상한 {MAX_DECODED_SEGMENTS}개를 넘습니다. "
+            "문서를 나눠서 넣어 주세요"
+        )
+    size = sum(len(seg.decoded) for seg in ctx.decoded_segments)
+    size += sum(len(decoded) for _, _, _, decoded, _ in found)
+    _check_decoded_size(size)
+
+    renormalize = ctx.renormalize or (lambda t: t)
+    size = sum(len(seg.decoded) for seg in ctx.decoded_segments)
+    for rs, re_, method, decoded, depth in found:
+        decoded = renormalize(decoded)
+        size += len(decoded)
+        _check_decoded_size(size)
+        ctx.add_decoded(method, (rs, re_), decoded, depth)
+
+
+def find_encodings(text: str) -> list[tuple[int, int, str, str, int]]:
     if not text:
-        return
+        return []
     taken = bytearray(len(text))
     found: list[tuple[int, int, str, str, int]] = []
 
@@ -121,33 +154,22 @@ def restore_encodings(ctx: Context) -> None:
             accept(s, e, "url", _from_url(text[s:e]))
     for m in _B64_TOKEN.finditer(text):
         s, e = m.span()
-        if not free(s, e) or token(s, e):
+        if not free(s, e):
             continue
-        for part in _PATH_PART.finditer(text, s, e):
-            if part.span() != (s, e) and free(*part.span()):
-                token(*part.span())
+        parts = [p.span() for p in _PATH_PART.finditer(text, s, e) if p.span() != (s, e)]
+        if parts and _dirty(_from_base64(text[s:e])):
+            if sum(token(*p) for p in parts if free(*p)):
+                continue
+        if token(s, e):
+            continue
+        for part in parts:
+            if free(*part):
+                token(*part)
     for s, e in _rot13_spans(text):
         if free(s, e):
             accept(s, e, "rot13", codecs.encode(text[s:e], "rot13"))
     found.extend(_reference_regions(text))
-
-    total = len(ctx.decoded_segments) + len(found)
-    if total > MAX_DECODED_SEGMENTS:
-        raise DocumentTooLongError(
-            f"복원 결과가 {total}개로 상한 {MAX_DECODED_SEGMENTS}개를 넘습니다. "
-            "문서를 나눠서 넣어 주세요"
-        )
-    size = sum(len(seg.decoded) for seg in ctx.decoded_segments)
-    size += sum(len(decoded) for _, _, _, decoded, _ in found)
-    _check_decoded_size(size)
-
-    renormalize = ctx.renormalize or (lambda t: t)
-    size = sum(len(seg.decoded) for seg in ctx.decoded_segments)
-    for s, e, method, decoded, depth in sorted(found):
-        decoded = renormalize(decoded)
-        size += len(decoded)
-        _check_decoded_size(size)
-        ctx.add_decoded(method, ctx.tt.raw_span(s, e), decoded, depth)
+    return found
 
 
 def _check_decoded_size(size: int) -> None:
@@ -259,6 +281,10 @@ def _acceptable(decoded: str) -> bool:
             if bad > allowed:
                 return False
     return True
+
+
+def _dirty(decoded: str | None) -> bool:
+    return decoded is not None and any(_unprintable(c) for c in decoded)
 
 
 def _unprintable(c: str) -> bool:

@@ -1,4 +1,4 @@
-# 전처리 변환 기록 형식 (정규화 1.0)
+# 전처리 변환 기록 형식 (정규화 1.1)
 
 룰 필터, 1차·2차 판정, web 이 전처리 결과(`Chunk`)를 읽을 때 보는 문서입니다. 양식 정의는 `common/schema.py`, 결정 배경은 `docs/decisions.md` ①·④·⑥ 에 있습니다.
 
@@ -53,16 +53,17 @@ rate = chunk.transform_log.zero_width_removed / max(len(chunk.raw_text), 1) * 10
 | 일부러 숨김 | `display_none`, `visibility_hidden`, `opacity_zero`, `font_size_zero`, `transparent_color`, `same_color`, `offscreen`, `zero_size_box`, `scale_zero`, `content_visibility_hidden`, `hidden_attr`, `dialog_closed`, `svg_non_text` | 스타일·속성으로 사람 눈에 안 보이게 한 글 |
 | 주석 | `comment`, `cdata`, `md_comment` | HTML 주석(브라우저가 주석으로 처리하는 `<?…>`·`<!…>`, 표준이 아닌 DOCTYPE 포함), CDATA, `[//]: # (...)` 같은 MD 주석 |
 | 구조상 안 보임 | `script`, `style`, `template`, `noscript`, `iframe`, `noembed`, `noframes`, `datalist`, `video`, `audio`, `canvas` | 화면에 그려지지 않는 요소 안의 글 |
+| 유출 단서 | `exfil_image` | 자리표시자(`{대화 내용}` 등)나 긴 쿼리 값이 붙은 외부 이미지 주소. AI 가 이 주소를 답에 넣으면 이미지를 불러오면서 데이터가 밖으로 나갑니다 |
 | 속성 글 | `attr_alt`, `attr_title`, `attr_aria_label`, `meta_content`, `input_hidden` | `alt`·`title`·`aria-label`, `meta` 설명, `input type=hidden` 값 |
 
-룰 필터 의심 신호로는 "일부러 숨김"과 "주석" 묶음을 세는 것을 권합니다. "구조상 안 보임"과 "속성 글"은 정상 웹 문서에도 흔하므로, 개수보다 그 안의 내용을 분류기가 보게 하는 편이 낫습니다.
+룰 필터 의심 신호로는 "일부러 숨김", "주석", "유출 단서" 묶음을 세는 것을 권합니다. "일부러 숨김" 은 인라인 `style` 뿐 아니라 `<style>` 블록의 클래스·ID 규칙으로 숨긴 글도 같은 이유 이름으로 남습니다. `exfil_image` 구간은 다른 숨김 구간과 겹칠 수 있습니다(숨긴 영역 안의 이미지). "구조상 안 보임"과 "속성 글"은 정상 웹 문서에도 흔하므로, 개수보다 그 안의 내용을 분류기가 보게 하는 편이 낫습니다.
 
 ## 5. `decoded_segments`
 
 | 칸 | 내용 |
 |---|---|
-| `method` | `base64`, `hex`, `url`, `rot13`, `unicode_tag`, `html_entity`(본문에 글자로 적힌 `&#105;` 등), `unicode_escape`(`\u0069` 등) |
-| `span` | `raw_text` 에서 인코딩된 글이 있던 위치. 청크에 걸친 부분만. `html_entity`·`unicode_escape` 는 표기 하나가 아니라 그 표기가 있는 줄(앞뒤 200자까지) |
+| `method` | `base64`, `hex`, `url`, `rot13`, `unicode_tag`, `html_entity`(본문에 글자로 적힌 `&#105;` 등), `unicode_escape`(`\u0069` 등), `variation_selector`(이모지 뒤에 변형 선택자를 줄줄이 붙여 숨긴 바이트) |
+| `span` | `raw_text` 에서 인코딩된 글이 있던 위치. 청크에 걸친 부분만. `html_entity`·`unicode_escape` 는 표기 하나가 아니라 그 표기가 있는 줄(앞뒤 200자까지). HTML 속성 값(`href` 등)에서 푼 것은 값 안의 인코딩 위치, 값에 엔티티가 섞여 있으면 속성 값 전체 |
 | `decoded` | 복원한 내용. ③ 유니코드 정규화와 ④ 홈글리프를 다시 거친 글. 안에 태그 문자로 숨긴 글이 있으면 해독해서 줄을 바꿔 뒤에 붙이고, 깨진 바이트는 `�`(U+FFFD)로 남습니다 |
 | `depth` | 몇 겹을 풀었나 (1~3, Base64 안의 ROT13 처럼 다른 방식이 겹친 것도 셈) |
 
@@ -71,7 +72,21 @@ rate = chunk.transform_log.zero_width_removed / max(len(chunk.raw_text), 1) * 10
 - `html_entity`·`unicode_escape` 는 줄 전체를 푼 글이라 `decoded` 에 표기 앞뒤의 평범한 글도 들어 있습니다. 표기 하나만 풀면 `gnore` 처럼 조각난 글만 남아 분류기가 문장을 볼 수 없기 때문입니다.
 - 한 문서의 복원 결과가 10,000개를 넘거나 모두 1,000,000자를 넘으면 `DocumentTooLongError` 로 거부합니다. 앞부분만 풀고 넘기지 않습니다.
 - JWT 는 머리·내용 부분이 정상 JSON 으로 복원됩니다. 기록은 하지만 공격 신호로 과대평가하지 않습니다.
-- 권장 사용: 복원 결과를 별도 청크로 만들어 1차 분류기에 함께 통과시킵니다 (decisions.md ⑥, 합의 필요).
+- 쓰는 법(decisions.md ⑥, 2026-10-26 확정): 복원 결과는 하나씩 따로 1차 분류기에 넣고, 384토큰을 넘으면 384토큰·50토큰 겹침으로 자릅니다. 잘린 조각은 모두 그 복원 결과의 `span` 을 위치로 씁니다. 학습 데이터도 같은 조각으로 만듭니다.
+
+```python
+from preprocess.decoded import decoded_inputs, decoded_texts
+
+for item in decoded_inputs(chunk):  # 서빙: 청크 하나의 복원 결과 조각
+    score = stage1(item.text)
+    evidence_span = item.span  # chunk.raw_text 기준, 원문의 인코딩 구간
+
+extra = decoded_texts(sample_text, fmt)  # 학습: 샘플 하나의 복원 결과 조각 (중복 제거)
+```
+
+- `item` 칸: `text`(분류기에 넣을 글), `span`, `method`, `depth`, `segment`(`decoded_segments` 번호), `window`(잘린 조각 번호, 0부터).
+- 인코딩된 글이 청크 경계에 걸치면 같은 복원 결과가 두 청크에 모두 들어갑니다. 판정은 문서 기준 위치(`chunk.span.start + span`)로 중복을 지웁니다(7절).
+- 학습 라벨: 공격 샘플이라도 복원 결과가 공격 문장과 상관없는 정상 글(개발 문서 예시 Base64 등)일 수 있습니다. 복원한 글에 그 샘플의 공격 문장(`answer`)이 들어 있을 때만 injection 으로 붙이는 것을 권합니다.
 
 ## 6. 근거 위치 찾기 (`find_quote`)
 
@@ -121,6 +136,6 @@ split_document(
   "transform_spans": [
     {"kind": "hidden_text_found", "span": {"start": 45, "end": 55}, "note": "display_none"}
   ],
-  "meta": {"normalize_version": "1.0", "unicode_version": "14.0.0", "fmt": "html"}
+  "meta": {"normalize_version": "1.1", "unicode_version": "14.0.0", "fmt": "html"}
 }
 ```

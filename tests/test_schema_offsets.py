@@ -72,7 +72,9 @@ def test_transform_span_accepted():
     assert _chunk("ab", "ab", [0, 1], transform_spans=[ok]).transform_spans == [ok]
 
 
-@pytest.mark.parametrize("method", ["unicode_tag", "html_entity", "unicode_escape"])
+@pytest.mark.parametrize(
+    "method", ["unicode_tag", "html_entity", "unicode_escape", "variation_selector"]
+)
 def test_new_decoded_methods_accepted(method):
     seg = DecodedSegment(method=method, span=Span(start=0, end=1), decoded="x")
     assert seg.method == method

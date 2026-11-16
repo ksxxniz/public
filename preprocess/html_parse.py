@@ -68,6 +68,15 @@ _DOCTYPE = re.compile(
     re.I,
 )
 _BGCOLOR_TAGS = frozenset("body table thead tbody tfoot tr td th marquee".split())
+_STYLE_OPEN = re.compile(r"<style(?=[\s/>])", re.I)
+_SIMPLE_SELECTOR = re.compile(r"(\*|[A-Za-z][\w-]*)?((?:[.#][\w-]+)*)")
+_SELECTOR_PART = re.compile(r"[.#][\w-]+")
+_GROUPING_RULES = ("media", "supports", "layer", "container", "document")
+_URL_ATTRIBUTES = frozenset(
+    "href src action formaction cite data poster background longdesc ping srcset".split()
+)
+_PLACEHOLDER = re.compile(r"\{[^{}]*\}|\[[^\[\]]*\]|<[^<>]*>|%s|\$\w+")
+_QUERY_VALUE = re.compile(r"[?&#][^=&#]*=([^&#]*)")
 _BARE_HEX = re.compile(r"[0-9a-fA-F]{6}")
 _HINT_VALUE = re.compile(r"#?[\w(),.% ]{1,64}")
 
@@ -77,6 +86,12 @@ TINY_FONT_PX = 1.0
 TINY_BOX_PX = 1.0
 OFFSCREEN_PX = -999.0
 MAX_ACTIVE_FORMATTING = 64
+MAX_STYLE_RULES = 2000
+MAX_RULES_PER_KEY = 32
+MAX_CLASSES = 16
+MAX_STYLE_CHECKS = 3_000_000
+MAX_CSS_NESTING = 8
+LONG_QUERY_VALUE = 32
 _OFFSCREEN_PROPS = ("left", "top", "text-indent", "margin-left", "margin-top")
 
 Color = tuple[float, float, float, float]
@@ -160,6 +175,8 @@ class ParsedHtml:
     pieces: list[Piece] = field(default_factory=list)
     breaks: list[int] = field(default_factory=list)
     attributes: list[Piece] = field(default_factory=list)
+    url_values: list[Piece] = field(default_factory=list)
+    marks: list[Piece] = field(default_factory=list)
 
     @property
     def hidden_pieces(self) -> list[Piece]:
@@ -228,14 +245,14 @@ class _Style:
 ROOT = _Style()
 
 
-def _element_style(tag: str, attrs, parent: _Style) -> _Style:
-    return _element_style_cached(tag, tuple(attrs), parent)
+def _element_style(tag: str, attrs, parent: _Style, sheet: str = "") -> _Style:
+    return _element_style_cached(tag, tuple(attrs), parent, sheet)
 
 
 @lru_cache(maxsize=8192)
-def _element_style_cached(tag: str, attrs: tuple, parent: _Style) -> _Style:
+def _element_style_cached(tag: str, attrs: tuple, parent: _Style, sheet: str = "") -> _Style:
     attr = _first_attrs(attrs)
-    style = _parse_style(_with_hints(tag, attr))
+    style = _parse_style(_with_hints(tag, attr, sheet))
     font_px = _font_size(style.get("font-size"), parent.font_px)
     color = _color_value(style.get("color"), parent.color)
     svg = (parent.svg or tag == "svg") and tag != "foreignobject"
@@ -251,13 +268,13 @@ def _element_style_cached(tag: str, attrs: tuple, parent: _Style) -> _Style:
     )
 
 
-def _with_hints(tag: str, attr: dict[str, str]) -> str:
+def _with_hints(tag: str, attr: dict[str, str], sheet: str = "") -> str:
     hints = [
         f"{prop}:{color}"
         for prop, name in _hint_attrs(tag)
         if (color := _legacy_color(attr.get(name) or "")) is not None
     ]
-    return ";".join([*hints, attr.get("style") or ""])
+    return ";".join([*hints, sheet, attr.get("style") or ""])
 
 
 def _hint_attrs(tag: str) -> list[tuple[str, str]]:
@@ -352,6 +369,7 @@ class _Parser(HTMLParser):
         self._at: dict[str, list[int]] = defaultdict(list)
         self._specials: list[int] = []
         self._listed: Counter[str] = Counter()
+        self._sheet = _StyleSheet(raw)
 
     def reset(self):
         super().reset()
@@ -460,9 +478,12 @@ class _Parser(HTMLParser):
         for j in range(i, len(f)):
             old = f[j]
             parent = self._current_style(foster=True)
-            node = _Node(old.tag, _element_style(old.tag, old.attrs, parent), old.attrs)
+            node = _Node(old.tag, self._style_of(old.tag, old.attrs, parent), old.attrs)
             self._push(node)
             f[j] = node
+
+    def _style_of(self, tag: str, attrs: tuple, parent: _Style) -> _Style:
+        return _element_style(tag, attrs, parent, self._sheet.declarations(tag, attrs))
 
     def _current_style(self, foster: bool) -> _Style:
         if foster and self._top() in _TABLE_CONTEXT and self._at["table"]:
@@ -480,7 +501,7 @@ class _Parser(HTMLParser):
 
     def _attribute_text(self, tag, attrs) -> None:
         wanted = _wanted_attributes(tag, attrs)
-        if not wanted:
+        if not wanted and not any(_url_like(name) for name, _ in attrs):
             return
         tag_text = self.get_starttag_text() or ""
         base = self._pos()
@@ -498,14 +519,21 @@ class _Parser(HTMLParser):
             if name in seen:
                 continue
             seen.add(name)
-            if name not in wanted or a.group(3) is None:
+            if a.group(3) is None or (name not in wanted and not _url_like(name)):
                 continue
             s, e = a.span(3)
             if e - s >= 2 and tag_text[s] in "'\"" and tag_text[e - 1] == tag_text[s]:
                 s, e = s + 1, e - 1
-            if tag_text[s:e].strip():
+            if not tag_text[s:e].strip():
+                continue
+            if name in wanted:
                 pieces = _value_pieces(self.raw, base + s, base + e, wanted[name])
                 self.result.attributes.extend(pieces)
+            else:
+                value = html.unescape(tag_text[s:e])
+                self.result.url_values.append(Piece(base + s, base + e, value, name))
+                if tag == "img" and name == "src" and exfil_url(value):
+                    self.result.marks.append(Piece(base + s, base + e, value, "exfil_image"))
 
     def _start(self, tag, attrs, self_closing: bool) -> None:
         if tag in _TABLE_PARTS and self._find({"table"}, _TABLE_SCOPE) is None:
@@ -521,7 +549,7 @@ class _Parser(HTMLParser):
         if self_closing and (parent.svg or tag == "svg"):
             return
         attrs = tuple(attrs)
-        node = _Node(tag, _element_style(tag, attrs, parent), attrs)
+        node = _Node(tag, self._style_of(tag, attrs, parent), attrs)
         self._push(node)
         if tag in _FORMATTING:
             self._remember(node)
@@ -675,6 +703,191 @@ def _benign_pi(data: str) -> bool:
     except LookupError:
         return False
     return True
+
+
+def _url_like(name: str) -> bool:
+    return name in _URL_ATTRIBUTES or name.startswith("data-")
+
+
+def exfil_url(url: str) -> bool:
+    url = url.strip()
+    if not url.lower().startswith(("http://", "https://", "//")):
+        return False
+    if _PLACEHOLDER.search(url):
+        return True
+    return any(len(v) >= LONG_QUERY_VALUE for v in _QUERY_VALUE.findall(url))
+
+
+@dataclass(frozen=True)
+class _Rule:
+    specificity: tuple[int, int, int]
+    order: int
+    tag: str | None
+    ident: str | None
+    classes: frozenset[str]
+    key: str
+    body: str
+
+
+class _StyleSheet:
+    def __init__(self, raw: str):
+        self.by_key: dict[str, list[_Rule]] = defaultdict(list)
+        self.checks = 0
+        self._memo: dict[tuple, str] = {}
+        count = 0
+        for css in _style_blocks(raw):
+            for prelude, body in _css_rules(css):
+                for sel in prelude.split(","):
+                    rule = _selector_rule(sel.strip(), count, body)
+                    if rule is None:
+                        continue
+                    self._add(rule)
+                    count += 1
+                    if count >= MAX_STYLE_RULES:
+                        return
+
+    def _add(self, rule: _Rule) -> None:
+        bucket = self.by_key[rule.key]
+        if len(bucket) < MAX_RULES_PER_KEY:
+            bucket.append(rule)
+            return
+        if not _rule_hides(rule):
+            return
+        for i, old in enumerate(bucket):
+            if not _rule_hides(old):
+                del bucket[i]
+                bucket.append(rule)
+                return
+
+    def declarations(self, tag: str, attrs) -> str:
+        if not self.by_key:
+            return ""
+        attrs = tuple(attrs)
+        key = (tag, attrs)
+        if key in self._memo:
+            return self._memo[key]
+        attr = _first_attrs(attrs)
+        classes = frozenset(list(dict.fromkeys((attr.get("class") or "").split()))[:MAX_CLASSES])
+        ident = (attr.get("id") or "").strip()
+        keys = [tag, "*", *("." + c for c in classes)]
+        if ident:
+            keys.append("#" + ident)
+        matched: list[_Rule] = []
+        for k in keys:
+            for rule in self.by_key.get(k, ()):
+                self.checks += 1
+                if rule.tag not in (None, tag) or not rule.classes <= classes:
+                    continue
+                if rule.ident is not None and rule.ident != ident:
+                    continue
+                matched.append(rule)
+        if self.checks > MAX_STYLE_CHECKS:
+            self.by_key.clear()
+        matched.sort(key=lambda r: (r.specificity, r.order))
+        out = ";".join(r.body for r in matched)
+        if len(self._memo) > 8192:
+            self._memo.clear()
+        self._memo[key] = out
+        return out
+
+
+def _rule_hides(rule: _Rule) -> bool:
+    return _text_reason(_element_style("span", (("style", rule.body),), ROOT)) is not None
+
+
+def _selector_rule(sel: str, order: int, body: str) -> _Rule | None:
+    m = _SIMPLE_SELECTOR.fullmatch(sel)
+    if not sel or m is None:
+        return None
+    tag = m.group(1).lower() if m.group(1) and m.group(1) != "*" else None
+    parts = _SELECTOR_PART.findall(m.group(2))
+    ids = {p[1:] for p in parts if p[0] == "#"}
+    classes = frozenset(p[1:] for p in parts if p[0] == ".")
+    if len(ids) > 1:
+        return None
+    ident = next(iter(ids)) if ids else None
+    if ident is not None:
+        key = "#" + ident
+    elif classes:
+        key = "." + min(classes)
+    else:
+        key = tag or "*"
+    spec = (len(ids), len(classes), 1 if tag else 0)
+    return _Rule(spec, order, tag, ident, classes, key, body)
+
+
+def _style_blocks(raw: str):
+    lower = raw.lower()
+    pos = 0
+    while True:
+        m = _STYLE_OPEN.search(raw, pos)
+        if m is None:
+            return
+        gt = raw.find(">", m.end())
+        if gt < 0:
+            return
+        end = lower.find("</style", gt + 1)
+        yield raw[gt + 1 : len(raw) if end < 0 else end]
+        if end < 0:
+            return
+        pos = end + 7
+
+
+def _strip_css_comments(css: str) -> str:
+    out = []
+    pos = 0
+    while True:
+        start = css.find("/*", pos)
+        if start < 0:
+            out.append(css[pos:])
+            return "".join(out)
+        out.append(css[pos:start])
+        end = css.find("*/", start + 2)
+        if end < 0:
+            return "".join(out)
+        pos = end + 2
+
+
+def _css_rules(css: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    todo = [(_strip_css_comments(css), 0)]
+    while todo and len(out) < MAX_STYLE_RULES:
+        text, depth = todo.pop()
+        found: list[tuple[str, str]] = []
+        nested: list[str] = []
+        i = 0
+        while i < len(text):
+            brace = text.find("{", i)
+            if brace < 0:
+                break
+            semi = text.rfind(";", i, brace)
+            start = semi + 1 if semi >= 0 else i
+            close = _matching_brace(text, brace)
+            prelude = text[start:brace].rsplit("}", 1)[-1].strip()
+            body = text[brace + 1 : close]
+            if prelude.startswith("@"):
+                name = prelude[1:].split(None, 1)[0].lower() if len(prelude) > 1 else ""
+                if name in _GROUPING_RULES and depth < MAX_CSS_NESTING:
+                    nested.append(body)
+            elif "{" not in body:
+                found.append((prelude, body))
+            i = close + 1
+        out.extend(found)
+        todo.extend((body, depth + 1) for body in reversed(nested))
+    return out[:MAX_STYLE_RULES]
+
+
+def _matching_brace(text: str, brace: int) -> int:
+    depth = 0
+    for i in range(brace, len(text)):
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(text)
 
 
 def _wanted_attributes(tag: str, attrs) -> dict[str, str]:
