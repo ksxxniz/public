@@ -59,6 +59,11 @@ def test_accent_after_homoglyph_is_composed():
     assert sum(ev.kind == "homoglyph_replaced" for ev in doc.events) == 3
 
 
-@pytest.mark.parametrize("mark", ["\u0310", "\u0901", "\u0e4d", "\u20dd"])
+@pytest.mark.parametrize("mark", ["\u0310", "\u0901", "\u0e4d"])
 def test_mark_inside_word_does_not_hide_homoglyphs(mark):
     assert normalize_text(f"\u0440\u0430{mark}ssword") == f"pa{mark}ssword"
+
+
+def test_enclosing_mark_inside_word_is_removed_before_homoglyphs():
+    # 1.2: 글자를 둘러싸는 부호(U+20DD)는 겹쳐 쓴 결합 문자로 보고 지운다
+    assert normalize_text("\u0440\u0430\u20ddssword") == "password"

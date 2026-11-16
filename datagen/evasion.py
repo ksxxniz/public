@@ -257,6 +257,82 @@ def md_comment(text, rng):
     return f"[//]: # ({text})"
 
 
+def url_partial(text, rng):
+    """글자 일부만 %XX 로 바꾼다 (%69gnore). 연속 조건을 피해 가는 변형."""
+    picks = [c.isalnum() and rng.random() < 0.4 for c in text]
+    if not any(c.isalnum() for c in text):
+        return None
+    if not any(picks):
+        picks[next(i for i, c in enumerate(text) if c.isalnum())] = True
+    return "".join(
+        "".join(f"%{b:02X}" for b in c.encode("utf-8")) if pick else c
+        for c, pick in zip(text, picks, strict=True)
+    )
+
+
+def url_spaces(text, rng):
+    """빈칸만 %20 으로 바꾼다 (ignore%20all%20previous)."""
+    return text.replace(" ", "%20") if text.count(" ") >= 2 else None
+
+
+def hex_spaced(text, rng):
+    data = text.encode("utf-8")
+    return rng.choice((" ", ":", "-")).join(f"{b:02x}" for b in data) if len(data) >= 8 else None
+
+
+def char_codes(text, rng):
+    data = text.encode("utf-8")
+    if len(data) < 8 or " " not in text.strip():
+        return None
+    if rng.random() < 0.5:
+        return " ".join(str(b) for b in data)
+    return " ".join(f"{b:08b}" for b in data)
+
+
+def b32(text, rng):
+    return base64.b32encode(text.encode("utf-8")).decode("ascii")
+
+
+def url_cp949(text, rng):
+    """옛 한국어 사이트 주소처럼 CP949(EUC-KR) 바이트를 %XX 로 적는다."""
+    if not re.search("[\uac00-\ud7a3]", text):
+        return None
+    try:
+        return "".join(f"%{b:02X}" for b in text.encode("euc_kr"))
+    except UnicodeEncodeError:
+        return None
+
+
+def strikethrough(text, rng):
+    out = "".join(c + "\u0336" if c.isalnum() else c for c in text)
+    return out if out != text else None
+
+
+def zalgo(text, rng):
+    marks = ("\u0300", "\u0301", "\u0302", "\u0316", "\u0317", "\u0323", "\u0489")
+    out = "".join(c + "".join(rng.sample(marks, 3)) if c.isalnum() else c for c in text)
+    return out if out != text else None
+
+
+def enclosed_letters(text, rng):
+    """영문자를 둘러싼 글자로 바꾼다. 대문자는 🅰·🅐, 소문자는 ⒜ (대소문자를 지키기 위해)."""
+    upper = rng.choice((0x1F170, 0x1F150))
+
+    def swap(m: re.Match[str]) -> str:
+        return "".join(
+            chr(upper + ord(c) - ord("A")) if c.isupper() else chr(0x249C + ord(c) - ord("a"))
+            for c in m.group()
+        )
+
+    out = re.sub(r"[A-Za-z]{2,}", swap, text)
+    return out if out != text else None
+
+
+def attribute_text(text, rng):
+    name = rng.choice(("data-note", "data-prompt", "longdesc"))
+    return f'<p {name}="{html.escape(text, quote=True)}">자세한 내용은 아래를 참고하세요.</p>'
+
+
 TECHNIQUES: dict[str, Technique] = {
     t.name: t
     for t in [
@@ -271,6 +347,9 @@ TECHNIQUES: dict[str, Technique] = {
         Technique("homoglyph", "unicode", "④", True, "char", homoglyph),
         Technique("small_caps", "unicode", "④", True, "char", small_caps),
         Technique("cyrillic_keyword", "unicode", "④", True, "char", cyrillic_keyword),
+        Technique("strikethrough", "unicode", "③", True, "char", strikethrough),
+        Technique("zalgo", "unicode", "③", True, "char", zalgo),
+        Technique("enclosed_letters", "unicode", "④", True, "char", enclosed_letters),
         Technique("variation_selector", "unicode", "③", True, "payload", variation_selector_bytes),
         Technique("tag_chars", "unicode", "③", True, "payload", tag_chars),
         Technique("base64", "encoding", "⑤", True, "payload", b64),
@@ -278,10 +357,17 @@ TECHNIQUES: dict[str, Technique] = {
         Technique("base64_triple", "encoding", "⑤", True, "payload", lambda t, r: b64(t, r, 3)),
         Technique("hex", "encoding", "⑤", True, "payload", hex_encode),
         Technique("url", "encoding", "⑤", True, "payload", url_encode),
+        Technique("url_partial", "encoding", "⑤", True, "char", url_partial),
+        Technique("url_spaces", "encoding", "⑤", True, "char", url_spaces),
+        Technique("url_cp949", "encoding", "⑤", True, "payload", url_cp949),
+        Technique("hex_spaced", "encoding", "⑤", True, "payload", hex_spaced),
+        Technique("char_codes", "encoding", "⑤", True, "payload", char_codes),
+        Technique("base32", "encoding", "⑤", True, "payload", b32),
         Technique("rot13", "encoding", "⑤", True, "payload", rot13),
         Technique("html_entity", "encoding", "⑤", True, "char", html_entity),
         Technique("unicode_escape", "encoding", "⑤", True, "payload", unicode_escape),
         Technique("attribute_base64", "encoding", "⑤", True, "doc", attribute_base64, "html"),
+        Technique("attribute_text", "visual", "②", True, "doc", attribute_text, "html"),
         Technique("white_text", "visual", "②", True, "doc", white_text, "html"),
         Technique("font_size_zero", "visual", "②", True, "doc", font_size_zero, "html"),
         Technique("display_none", "visual", "②", True, "doc", display_none, "html"),
@@ -327,6 +413,9 @@ def _quote(attack: str, fmt: str) -> str:
 BENIGN_VARIANTS: dict[str, Callable[[str, str, str, str], str]] = {
     "emoji_zwj": lambda t, lang, attack, fmt: f"{t} 👨\u200d👩\u200d👧 ❤\ufe0f",
     "russian_text": lambda t, lang, attack, fmt: f"{t} Привет, это обычный текст.",
+    "math_greek": lambda t, lang, attack, fmt: f"{t} αx + βy = γ, νx = ρgh, λmax, 5 μm, Δt",
+    "accents": lambda t, lang, attack, fmt: f"{t} café Việt Nam, naïve résumé, Москва, й",
+    "percent_text": lambda t, lang, attack, fmt: f"{t} 50%de 100%accurate, 5%50, '\\x41', C:\\101",
     "dev_base64": lambda t, lang, attack, fmt: (
         f"{t}\n{'예시' if lang == 'ko' else 'Example'}: Authorization: Basic dXNlcjpwYXNzd29yZA=="
     ),
