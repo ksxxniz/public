@@ -37,10 +37,10 @@ def _score(text: str) -> float:
     # 인용·예시 표시 안의 공격 문구는 점수를 낮춘다 (룰 필터의 인용문 절반 규칙,
     # 1차 학습 데이터의 hard negative 와 같은 취지). 정상 변형 7종의
     # quoted_attack 기준선을 스텁으로도 지키기 위해 필요하다 (⑧ 스텁도 계약을 지킨다)
-    from rule.filter import _quoted
+    from pipeline.stubutil import looks_quoted
 
     for m in _STRONG.finditer(text):
-        if not _quoted(text, m.start(), m.end()):
+        if not looks_quoted(text, m.start(), m.end()):
             return 0.95
         return 0.60  # 인용된 공격 문구 → 애매 (2차로)
     if _WEAK.search(text):

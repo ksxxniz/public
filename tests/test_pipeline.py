@@ -183,7 +183,7 @@ def test_fault_rule_exception_blocks_only_that_chunk(monkeypatch):
     """룰 예외: 그 조각만 차단하고 나머지는 정상 진행. 판정은 저장 금지"""
     import rule.filter as rf
 
-    original = rf.check_chunk
+    original = rf.check_chunk_with_hits
     boom = {"n": 0}
 
     def flaky(chunk):
@@ -192,7 +192,7 @@ def test_fault_rule_exception_blocks_only_that_chunk(monkeypatch):
             raise RuntimeError("규칙 하나가 에러")
         return original(chunk)
 
-    monkeypatch.setattr(rf, "check_chunk", flaky)
+    monkeypatch.setattr(rf, "check_chunk_with_hits", flaky)
     filler = "연차 규정 안내문입니다. " * 40  # 두 조각 이상
     conn = logdb.connect(":memory:")
     report = make_orch(conn=conn).inspect_text(filler, doc_id="flaky")
@@ -318,3 +318,40 @@ def test_pipeline_ver_components():
 
     for part in (f"pp:{VERSION}", f"rule:{RULE_VERSION}", "s1:stage1-stub", "th:"):
         assert part in orch.pipeline_ver
+
+
+# ── 단계별 시간 기록 (④) ──
+
+
+def test_stage2_time_is_recorded():
+    """2차를 부르면 걸린 시간이 Timings.stage2_ms 에 쌓인다. 안 부르면 0"""
+
+    def slow_benign(chunk) -> StageResult:
+        time.sleep(0.05)
+        return StageResult(
+            stage="stage2",
+            label="benign",
+            risk_score=0.05,
+            confidence=0.9,
+            latency_ms=50.0,
+            model_ver="slow",
+        )
+
+    orch = Orchestrator(load_stage1("stub"), Stage2Handle(slow_benign, "slow"), None)
+    called = orch.inspect_text("시스템 프롬프트 설정 방법을 설명하는 안내 문서입니다.", doc_id="t")
+    assert sum(called.routes.values()) == 1
+    assert called.timings.stage2_ms >= 50
+    skipped = orch.inspect_text(BASE_TEXT, doc_id="t2")
+    assert sum(skipped.routes.values()) == 0
+    assert skipped.timings.stage2_ms == 0
+
+
+def test_stage2_timeout_counts_waited_time():
+    def hang(chunk):
+        time.sleep(0.2)
+
+    orch = Orchestrator(
+        load_stage1("stub"), Stage2Handle(hang, "hang"), None, stage2_timeout_s=0.02
+    )
+    report = orch.inspect_text("시스템 프롬프트 설정 방법을 설명하는 안내 문서입니다.", doc_id="t")
+    assert report.timings.stage2_ms == pytest.approx(20)

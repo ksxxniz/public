@@ -159,12 +159,13 @@ class Orchestrator:
 
         # ── 룰: 조각마다. 예외는 그 조각만 차단하고 나머지는 정상 진행 (⑥) ──
         rule_results: dict[str, StageResult | None] = {}
+        rule_hits: dict[str, list] = {}  # 키워드 위치. 마스킹이 다시 계산하지 않게 넘긴다
         for c in todo:
             t = time.perf_counter()
             try:
-                from rule.filter import check_chunk
+                from rule.filter import check_chunk_with_hits
 
-                rule_results[c.chunk_id] = check_chunk(c)
+                rule_results[c.chunk_id], rule_hits[c.chunk_id] = check_chunk_with_hits(c)
             except Exception as e:
                 rule_results[c.chunk_id] = self._rule_error_result(e, time.perf_counter() - t)
         report.timings.rule_ms = sum(r.latency_ms for r in rule_results.values() if r is not None)
@@ -203,7 +204,8 @@ class Orchestrator:
         s2_results: dict[str, StageResult | None] = {}
         s2_failed: dict[str, bool] = {}
         pending = [c for c in todo if chunk_routes[c.chunk_id]]
-        for c, (res, failed, err) in zip(pending, self._stage2_batch(pending), strict=True):
+        for c, (res, failed, err, ms) in zip(pending, self._stage2_batch(pending), strict=True):
+            report.timings.stage2_ms += ms
             s2_results[c.chunk_id] = res
             s2_failed[c.chunk_id] = failed
             if failed and err:
@@ -221,6 +223,7 @@ class Orchestrator:
                 s1_failed=s1_failed,
                 routes=routes,
                 report=report,
+                rule_hits=rule_hits.get(c.chunk_id),
             )
 
         # ── 문서 단위 집계 (⑤): 공격 구간 합집합을 모든 조각에 적용 ──
@@ -289,6 +292,7 @@ class Orchestrator:
         s1_failed: bool,
         routes: dict[str, int],
         report: DocumentReport,
+        rule_hits: list | None = None,
     ) -> Verdict:
         results: list[StageResult] = [r for r in (rule_res, s1, s2) if r is not None]
         merged = merge(rule_res, s1, s2, s2_needed=s2_needed, s2_failed=s2_was_failed)
@@ -308,7 +312,7 @@ class Orchestrator:
         if merged.final == "injection":
             final_label = "injection"
             action, masked_spans, extra = self._apply_policy(
-                chunk, rule_res, s1, s2, routes, report
+                chunk, rule_res, s1, s2, routes, report, rule_hits
             )
             results += extra
         elif merged.final == "warn":
@@ -346,6 +350,7 @@ class Orchestrator:
         s2: StageResult | None,
         routes: dict[str, int],
         report: DocumentReport,
+        rule_hits: list | None = None,
     ) -> tuple[str, list[Span], list[StageResult]]:
         """공격 조각 처리 (⑤). (action, 지울 구간, 추가 단계 결과) 를 돌려준다"""
         whole = [Span(start=0, end=len(chunk.raw_text))]
@@ -361,7 +366,7 @@ class Orchestrator:
         extra: list[StageResult] = []
         rule_spans, _body_only = ([], False)
         if rule_res is not None and not rule_res.fallback:
-            rule_spans, _body_only = P.rule_mask_spans(chunk)
+            rule_spans, _body_only = P.rule_mask_spans(chunk, rule_hits)
         spans += rule_spans
         spans += P.stage_mask_spans(chunk, s1)
         spans += P.stage_mask_spans(chunk, s2)
@@ -370,7 +375,8 @@ class Orchestrator:
         # 1차에서 바로 차단된 평문 공격 조각이 통째로 빠지는 것을 막는다 [바꿈].
         if not spans and self.stage2 is not None:
             routes["locate"] += 1
-            res, failed, err = self._call_stage2(chunk)
+            res, failed, err, ms = self._call_stage2(chunk)
+            report.timings.stage2_ms += ms
             if err:
                 report.warnings.append(f"2차 장애(locate, {chunk.chunk_id}): {err}")
             if not failed and res is not None:
@@ -425,7 +431,8 @@ class Orchestrator:
         )
         if needs_s2 and self.stage2 is not None:
             routes["recheck"] += 1
-            res, failed, err = self._call_stage2(masked)
+            res, failed, err, ms = self._call_stage2(masked)
+            report.timings.stage2_ms += ms
             if err:
                 report.warnings.append(f"2차 장애(recheck, {chunk.chunk_id}): {err}")
             if not failed and res is not None:
@@ -447,36 +454,47 @@ class Orchestrator:
             elif not self.circuit.allow():
                 futures.append("circuit_open")
             else:
-                futures.append(self._pool.submit(self.stage2.judge_chunk, c))
+                futures.append(self._pool.submit(self._timed_judge, c))
         out = []
         for fut in futures:
             if fut is None:
-                out.append((None, True, "stage2_off"))
+                out.append((None, True, "stage2_off", 0.0))
             elif fut == "circuit_open":
-                out.append((None, True, "circuit_open"))
+                out.append((None, True, "circuit_open", 0.0))
             else:
                 out.append(self._collect(fut))
         return out
 
     def _call_stage2(self, chunk: Chunk):
         if self.stage2 is None:
-            return None, True, "stage2_off"
+            return None, True, "stage2_off", 0.0
         if not self.circuit.allow():
-            return None, True, "circuit_open"
-        return self._collect(self._pool.submit(self.stage2.judge_chunk, chunk))
+            return None, True, "circuit_open", 0.0
+        return self._collect(self._pool.submit(self._timed_judge, chunk))
+
+    def _timed_judge(self, chunk: Chunk):
+        """2차 호출 하나와 걸린 시간(ms). 실패해도 시간은 남기려고 예외를 값으로 돌려준다"""
+        started = time.perf_counter()
+        try:
+            return self.stage2.judge_chunk(chunk), None, (time.perf_counter() - started) * 1000
+        except Exception as e:
+            return None, e, (time.perf_counter() - started) * 1000
 
     def _collect(self, fut):
+        """(결과, 실패 여부, 오류 설명, 걸린 시간 ms). 시간은 Timings.stage2_ms 에 더한다.
+        시간 초과는 기다린 만큼(타임아웃 값)을 걸린 시간으로 센다"""
         try:
-            res = fut.result(timeout=self.stage2_timeout_s)
+            res, exc, ms = fut.result(timeout=self.stage2_timeout_s)
         except FutureTimeout:
             fut.cancel()
             self.circuit.record_failure()
-            return None, True, f"timeout>{self.stage2_timeout_s}s"
-        except Exception as e:
+            timeout_ms = self.stage2_timeout_s * 1000
+            return None, True, f"timeout>{self.stage2_timeout_s}s", timeout_ms
+        if exc is not None:
             self.circuit.record_failure()
-            return None, True, repr(e)
+            return None, True, repr(exc), ms
         self.circuit.record_success()
-        return res, False, None
+        return res, False, None, ms
 
     # ── 장애·로그 보조 ──
 

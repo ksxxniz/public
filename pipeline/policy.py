@@ -45,12 +45,13 @@ def _covering_hidden(chunk: Chunk, span: Span) -> Span:
     return span
 
 
-def rule_mask_spans(chunk: Chunk) -> tuple[list[Span], bool]:
+def rule_mask_spans(chunk: Chunk, hits: list | None = None) -> tuple[list[Span], bool]:
     """룰 근거의 마스킹 구간. (구간들, 본문에서만 걸린 키워드가 있는가)를 돌려준다.
-    본문 키워드는 위치를 마스킹에 쓰지 않으므로 2차 인용문이 필요하다는 뜻이다"""
+    본문 키워드는 위치를 마스킹에 쓰지 않으므로 2차 인용문이 필요하다는 뜻이다.
+    hits 는 check_chunk_with_hits 가 돌려준 키워드 위치 목록. 없으면 여기서 구한다"""
     spans: list[Span] = []
     body_only = False
-    for h in rule_filter.keyword_hits(chunk):
+    for h in rule_filter.keyword_hits(chunk) if hits is None else hits:
         if h.rule.endswith("+decoded"):
             spans.append(h.span)  # 인코딩 구간 전체 (Base64 일부만 지우는 건 의미 없음)
         elif h.rule.endswith("+hidden"):

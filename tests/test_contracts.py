@@ -49,6 +49,19 @@ def test_rule_contract():
             )
 
 
+def test_rule_hits_match_single_pass():
+    """check_chunk_with_hits 는 check_chunk 와 같은 판정에 키워드 위치를 더해 준다.
+    파이프라인 마스킹이 이 목록을 받아 쓰므로 따로 구한 것과 같아야 한다"""
+    from pipeline import policy as P
+    from rule.filter import check_chunk, check_chunk_with_hits
+
+    for chunk in [CHUNK] + _chunks() + _chunks(BENIGN_TEXT):
+        result, hits = check_chunk_with_hits(chunk)
+        plain = check_chunk(chunk)
+        assert result.model_dump(exclude={"latency_ms"}) == plain.model_dump(exclude={"latency_ms"})
+        assert P.rule_mask_spans(chunk, hits) == P.rule_mask_spans(chunk)
+
+
 # ── 1차 → 파이프라인 (스텁) ──
 
 

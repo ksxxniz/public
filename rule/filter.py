@@ -27,8 +27,15 @@ class Hit:
 
 
 def check_chunk(chunk: Chunk) -> StageResult:
+    return check_chunk_with_hits(chunk)[0]
+
+
+def check_chunk_with_hits(chunk: Chunk) -> tuple[StageResult, list[Hit]]:
+    """check_chunk 와 같은 판정에, 키워드 규칙이 걸린 위치 목록을 함께 돌려준다.
+    파이프라인의 마스킹이 이 목록을 써서 룰 필터를 두 번 돌리지 않는다"""
     started = time.perf_counter()
-    best = strongest_per_rule(signal_hits(chunk) + keyword_hits(chunk))
+    keywords = keyword_hits(chunk)
+    best = strongest_per_rule(signal_hits(chunk) + keywords)
     risk = combine(best.values())
     top = max(
         best.values(),
@@ -43,7 +50,7 @@ def check_chunk(chunk: Chunk) -> StageResult:
     # (0.3.0, common PR 2) 걸린 위치 전부. 숨김 구간 두 곳에 나눠 넣은 공격이
     # 한 곳만 지워지지 않도록 마스킹이 이 목록을 쓴다.
     spans = sorted({(h.span.start, h.span.end) for h in best.values() if h.span is not None})
-    return StageResult(
+    result = StageResult(
         stage="rule",
         label="injection" if risk >= R.INJECTION_AT else "benign",
         risk_score=round(risk, 4),
@@ -55,6 +62,7 @@ def check_chunk(chunk: Chunk) -> StageResult:
         latency_ms=(time.perf_counter() - started) * 1000,
         model_ver=R.RULE_VERSION,
     )
+    return result, keywords
 
 
 def strongest_per_rule(hits: list[Hit]) -> dict[str, Hit]:

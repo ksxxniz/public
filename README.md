@@ -35,7 +35,8 @@
 ## 7. 실행 방법 (5단계 통합)
 
 ```bash
-uv sync                                   # 의존성 설치 (1차 real 은 GPU 환경에서 torch·transformers 별도)
+uv sync                                   # 의존성 설치
+uv sync --group stage1                    # 1차 진짜 부품용 (torch·transformers·wandb)
 uv run python -m pipeline.run --file 문서.md          # 파이프라인 검사 (1차·2차는 기본 스텁)
 uv run python -m pipeline.run --file 문서.md --stage1 real --stage2 real --model exaone
 uv run python -m rag.demo                 # 작은 RAG 방어 OFF/ON 비교 (7단계 시연·6단계 ASR 공용 시나리오)

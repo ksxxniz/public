@@ -52,7 +52,7 @@ class StubJudge:
             )
         quotes = []
         if self.mode == "ok":
-            from rule.filter import _quoted
+            from pipeline.stubutil import looks_quoted
 
             texts = [chunk.text] + [seg.decoded for seg in chunk.decoded_segments]
             for text in texts:
@@ -63,7 +63,7 @@ class StubJudge:
                     # 인용·예시 안의 공격 문구는 "교육 자료의 인용"으로 보고 정상
                     # 처리한다 (진짜 2차 프롬프트 v0.3 의 인용 처리와 같은 취지)
                     base = text.find(s)
-                    if base >= 0 and _quoted(text, base + m.start(), base + m.end()):
+                    if base >= 0 and looks_quoted(text, base + m.start(), base + m.end()):
                         continue
                     quotes.append(s)
         if not quotes:
