@@ -14,6 +14,7 @@ SIGNALS = (
     "zero_width_removed",
     "bidi_removed",
     "variation_selector_removed",
+    "combining_removed",
     "homoglyph_replaced",
     "nfkc_changed",
     "hidden_text_found",

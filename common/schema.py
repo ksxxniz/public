@@ -22,7 +22,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "0.2.4"
+SCHEMA_VERSION = "0.2.5"
 
 Label = Literal["benign", "injection"]
 Stage = Literal["preprocess", "rule", "stage1", "stage2"]
@@ -59,6 +59,9 @@ class DecodedSegment(_Model):
         "html_entity",
         "unicode_escape",
         "variation_selector",
+        "base32",
+        "quoted_printable",
+        "char_code",  # 숫자로 적은 글자 코드 나열 (10진 105 103 …, 2진 01101001 …)
     ]
     span: Span  # 원문에서 인코딩된 문자열이 있던 위치
     decoded: str  # 복원된 내용
@@ -77,6 +80,8 @@ class TransformLog(_Model):
     variation_selector_removed: int = Field(default=0, ge=0)
     tag_chars_decoded: int = Field(default=0, ge=0)  # 태그 문자 U+E0000~E007F
     bidi_removed: int = Field(default=0, ge=0)  # 방향 제어문자
+    # 글자 위에 겹쳐 쓴 결합 문자 (취소선 i̶g̶n̶, 잘고 글씨). 정상 악센트는 세지 않는다
+    combining_removed: int = Field(default=0, ge=0)
     nfkc_changed: int = Field(default=0, ge=0)  # NFKC 로 바뀐 곳 수 (0.1.0 에서는 참/거짓)
     jamo_assembled: int = Field(default=0, ge=0)  # 쪼갠 자모(ㄱㅗㅇ)를 조립해 만든 음절 수
     homoglyph_replaced: int = Field(default=0, ge=0)  # 닮은꼴 글자

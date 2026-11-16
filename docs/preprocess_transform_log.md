@@ -1,4 +1,4 @@
-# 전처리 변환 기록 형식 (정규화 1.1)
+# 전처리 변환 기록 형식 (정규화 1.2)
 
 룰 필터, 1차·2차 판정, web 이 전처리 결과(`Chunk`)를 읽을 때 보는 문서입니다. 양식 정의는 `common/schema.py`, 결정 배경은 `docs/decisions.md` ①·④·⑥ 에 있습니다.
 
@@ -26,9 +26,10 @@
 | `variation_selector_removed` | 이모지가 아닌 글자 뒤의 변형 선택자, 몽골 변형 선택자 | 0 | 신호 |
 | `tag_chars_decoded` | 해독한 태그 문자 수 (국기 이모지의 하위 지역 표시는 제외) | 0 | 매우 강한 신호 |
 | `bidi_removed` | 양방향 제어문자 | 아랍어·히브리어 문서에 있음 | 약한 신호 |
+| `combining_removed` | 글자·숫자에 겹쳐 쓴 결합 문자를 지운 곳 수 (취소선 `i̶g̶n̶`, 둘러싸는 부호, 3개 이상 쌓인 잘고 글씨). 정상 악센트는 세지 않음. 1.2 에서 추가 | 거의 0 | 강한 신호 |
 | `nfkc_changed` | NFKC 로 바뀐 곳 수 (전각 문자, NBSP, ㈜ 등) | 흔함 | 약한 신호 |
 | `jamo_assembled` | 쪼갠 자모(`ㅁㅜㅅㅣ`)를 조립한 음절 수 | 0 | 신호 |
-| `homoglyph_replaced` | 문자 체계가 섞인 단어에서 라틴 문자로 바꾼 닮은꼴 글자 수 | 거의 0 | 강한 신호 |
+| `homoglyph_replaced` | 문자 체계가 섞인 단어에서 라틴 문자로 바꾼 닮은꼴 글자 수, 보통 글자로 바꾼 둘러싼 글자(`🅸`, `⒤`, `🇮`) 수 | 거의 0 | 강한 신호 |
 | `hidden_text_found` | 숨김 구간 수. 이유는 `transform_spans` 의 `note` | HTML 은 script·style·alt 때문에 흔함 | `note` 로 나눠서 쓴다 (4절) |
 | `decoded_count` | 그 청크의 `decoded_segments` 개수 | 개발 문서의 Base64·JWT, 인코딩된 URL 에서 나옴 | 개수보다 복원 내용을 판정한다 (5절) |
 
@@ -54,16 +55,16 @@ rate = chunk.transform_log.zero_width_removed / max(len(chunk.raw_text), 1) * 10
 | 주석 | `comment`, `cdata`, `md_comment` | HTML 주석(브라우저가 주석으로 처리하는 `<?…>`·`<!…>`, 표준이 아닌 DOCTYPE 포함), CDATA, `[//]: # (...)` 같은 MD 주석 |
 | 구조상 안 보임 | `script`, `style`, `template`, `noscript`, `iframe`, `noembed`, `noframes`, `datalist`, `video`, `audio`, `canvas` | 화면에 그려지지 않는 요소 안의 글 |
 | 유출 단서 | `exfil_image` | 자리표시자(`{대화 내용}` 등)나 긴 쿼리 값이 붙은 외부 이미지 주소. AI 가 이 주소를 답에 넣으면 이미지를 불러오면서 데이터가 밖으로 나갑니다 |
-| 속성 글 | `attr_alt`, `attr_title`, `attr_aria_label`, `meta_content`, `input_hidden` | `alt`·`title`·`aria-label`, `meta` 설명, `input type=hidden` 값 |
+| 속성 글 | `attr_alt`, `attr_title`, `attr_aria_label`, `attr_aria_description`, `attr_text`, `meta_content`, `input_hidden` | `alt`·`title`·`aria-label`·`aria-description`, `meta` 설명, `input type=hidden` 값. `attr_text` 는 `data-*`·`longdesc` 같은 데이터·주소 속성에 적은 문장(1.2 추가) |
 
-룰 필터 의심 신호로는 "일부러 숨김", "주석", "유출 단서" 묶음을 세는 것을 권합니다. "일부러 숨김" 은 인라인 `style` 뿐 아니라 `<style>` 블록의 클래스·ID 규칙으로 숨긴 글도 같은 이유 이름으로 남습니다. `exfil_image` 구간은 다른 숨김 구간과 겹칠 수 있습니다(숨긴 영역 안의 이미지). "구조상 안 보임"과 "속성 글"은 정상 웹 문서에도 흔하므로, 개수보다 그 안의 내용을 분류기가 보게 하는 편이 낫습니다.
+룰 필터 의심 신호로는 "일부러 숨김", "주석", "유출 단서" 묶음을 세는 것을 권합니다. "일부러 숨김" 은 인라인 `style` 뿐 아니라 `<style>` 블록의 클래스·ID 규칙으로 숨긴 글도 같은 이유 이름으로 남습니다. `exfil_image` 구간은 다른 숨김 구간과 겹칠 수 있습니다(숨긴 영역 안의 이미지). "구조상 안 보임"과 "속성 글"은 정상 웹 문서에도 흔하므로, 개수보다 그 안의 내용을 분류기가 보게 하는 편이 낫습니다. 화면에 보이는 `placeholder` 와 `<input>` 값(hidden 제외)은 1.2 부터 정리본에 들어가지만 숨김이 아니라서 `hidden_text_found` 에는 넣지 않습니다.
 
 ## 5. `decoded_segments`
 
 | 칸 | 내용 |
 |---|---|
-| `method` | `base64`, `hex`, `url`, `rot13`, `unicode_tag`, `html_entity`(본문에 글자로 적힌 `&#105;` 등), `unicode_escape`(`\u0069` 등), `variation_selector`(이모지 뒤에 변형 선택자를 줄줄이 붙여 숨긴 바이트) |
-| `span` | `raw_text` 에서 인코딩된 글이 있던 위치. 청크에 걸친 부분만. `html_entity`·`unicode_escape` 는 표기 하나가 아니라 그 표기가 있는 줄(앞뒤 200자까지). HTML 속성 값(`href` 등)에서 푼 것은 값 안의 인코딩 위치, 값에 엔티티가 섞여 있으면 속성 값 전체 |
+| `method` | `base64`, `hex`, `url`, `rot13`, `unicode_tag`, `html_entity`(본문에 글자로 적힌 `&#105;` 등), `unicode_escape`(`\u0069` 등), `variation_selector`(이모지 뒤에 변형 선택자를 줄줄이 붙여 숨긴 바이트), 1.2 추가: `base32`, `quoted_printable`, `char_code`(10진·2진 글자 코드 나열) |
+| `span` | `raw_text` 에서 인코딩된 글이 있던 위치. 청크에 걸친 부분만. `html_entity`·`unicode_escape` 와 띄엄띄엄 쓴 `%69`·`\x69`·`\151` 을 푼 `url`·`hex`·`unicode_escape` 는 표기 하나가 아니라 그 표기가 있는 줄(앞뒤 200자까지). HTML 속성 값(`href` 등)에서 푼 것은 값 안의 인코딩 위치, 값에 엔티티가 섞여 있으면 속성 값 전체 |
 | `decoded` | 복원한 내용. ③ 유니코드 정규화와 ④ 홈글리프를 다시 거친 글. 안에 태그 문자로 숨긴 글이 있으면 해독해서 줄을 바꿔 뒤에 붙이고, 깨진 바이트는 `�`(U+FFFD)로 남습니다 |
 | `depth` | 몇 겹을 풀었나 (1~3, Base64 안의 ROT13 처럼 다른 방식이 겹친 것도 셈) |
 
@@ -136,6 +137,6 @@ split_document(
   "transform_spans": [
     {"kind": "hidden_text_found", "span": {"start": 45, "end": 55}, "note": "display_none"}
   ],
-  "meta": {"normalize_version": "1.1", "unicode_version": "14.0.0", "fmt": "html"}
+  "meta": {"normalize_version": "1.2", "unicode_version": "14.0.0", "fmt": "html"}
 }
 ```

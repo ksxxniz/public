@@ -5,8 +5,9 @@
   ② 포맷 파싱 ........... markup.py  HTML 텍스트 추출·엔티티 복원·블록 줄바꿈, 숨김 구간 표시
                                     (MD 는 글자를 바꾸지 않고 표시만)
   ③ 유니코드 정규화 ..... unicode_steps.py  태그 문자 → 변형 선택자 바이트 → 양방향 제어
-                                            → 보이지 않는 문자 → NFKC → 자모 조립 → 공백 정리
-  ④ 홈글리프 ............ homoglyph.py  문자 체계가 섞인 단어만
+                                            → 보이지 않는 문자 → 겹쳐 쓴 결합 문자 → NFKC
+                                            → 자모 조립 → 공백 정리
+  ④ 홈글리프 ............ homoglyph.py  둘러싼 글자(🅸 → I), 문자 체계가 섞인 단어의 닮은꼴 글자
   ⑤ 인코딩 복원 ......... encoding.py  결과는 decoded_segments 로 (본문에 섞지 않음)
   ⑦ 청킹 ................ chunk.py
 
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from common.schema import DecodedSegment
 from preprocess.context import MAX_DOCUMENT_CHARS, Context, DocumentTooLongError, Event
 from preprocess.encoding import restore_encodings
-from preprocess.homoglyph import replace_homoglyphs
+from preprocess.homoglyph import fold_enclosed_letters, replace_homoglyphs
 from preprocess.markup import parse_markup
 from preprocess.tracked import TrackedText
 from preprocess.unicode_steps import (
@@ -37,6 +38,7 @@ from preprocess.unicode_steps import (
     decode_variation_selectors,
     remove_bidi,
     remove_invisible,
+    strip_combining_noise,
     tidy_whitespace,
 )
 
@@ -58,7 +60,7 @@ __all__ = [
 
 # 정규화 동작이 바뀔 때마다 올리고 preprocess/CHANGELOG.md 에 적는다.
 # 1.0 = 3주차 말 (2주차 말 0.1 은 따로 내지 않고 1.0 에 합침)
-VERSION = "1.1"
+VERSION = "1.2"
 
 # 파이썬 버전마다 유니코드 데이터가 달라 NFKC 결과가 바뀔 수 있다 (3.11 = 14.0, 3.12 = 15.0).
 # 학습과 서빙이 같은 정규화를 거쳤는지 확인할 수 있게 청크 meta 에 같이 남긴다.
@@ -94,6 +96,8 @@ TEXT_STEPS: list[Step] = [
     decode_variation_selectors,
     remove_bidi,
     remove_invisible,
+    strip_combining_noise,
+    fold_enclosed_letters,
     apply_nfkc,
     replace_homoglyphs,
     assemble_jamo,

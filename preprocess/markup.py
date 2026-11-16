@@ -4,7 +4,8 @@ from collections import defaultdict
 
 from preprocess.context import Context
 from preprocess.html_parse import (
-    ATTRIBUTE_REASONS,
+    TEXT_ATTRIBUTE_REASONS,
+    VISIBLE_ATTRIBUTE_REASONS,
     Piece,
     exfil_url,
     html5_parser_available,
@@ -13,9 +14,7 @@ from preprocess.html_parse import (
 from preprocess.tracked import Edit
 
 _TAG_CHARS = re.compile("[\U000e0000-\U000e007f]+")
-_SEPARATE = frozenset(
-    {*ATTRIBUTE_REASONS.values(), "meta_content", "input_hidden", "comment", "cdata"}
-)
+_SEPARATE = frozenset({*TEXT_ATTRIBUTE_REASONS, "meta_content", "input_hidden", "comment", "cdata"})
 
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
 _BACKTICKS = re.compile(r"`+")
@@ -113,7 +112,7 @@ def _hidden_regions(kept: list[Piece]) -> list[tuple[int, int, str]]:
     for p in kept:
         if not p.text.strip():
             continue
-        if p.hidden is None:
+        if p.hidden is None or p.hidden in VISIBLE_ATTRIBUTE_REASONS:
             current = None
             continue
         if (
@@ -152,7 +151,7 @@ def _mark_markdown(ctx: Context) -> None:
     if _HTML_LIKE.search(scan) and html5_parser_available():
         parsed = parse_html(scan)
         for p in parsed.pieces + parsed.attributes:
-            if p.hidden:
+            if p.hidden and p.hidden not in VISIBLE_ATTRIBUTE_REASONS:
                 found.append((p.start, p.end, p.hidden))
         exfil.extend((p.start, p.end, p.hidden or "") for p in parsed.marks)
     for s, e, reason in _merge(found, text) + _merge(exfil, text):
