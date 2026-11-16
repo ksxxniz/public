@@ -31,3 +31,18 @@
 
 ## 6. 결과 분석 및 한계점
 - (추후 작성 예정)
+
+## 7. 실행 방법 (5단계 통합)
+
+```bash
+uv sync                                   # 의존성 설치 (1차 real 은 GPU 환경에서 torch·transformers 별도)
+uv run python -m pipeline.run --file 문서.md          # 파이프라인 검사 (1차·2차는 기본 스텁)
+uv run python -m pipeline.run --file 문서.md --stage1 real --stage2 real --model exaone
+uv run python -m rag.demo                 # 작은 RAG 방어 OFF/ON 비교 (7단계 시연·6단계 ASR 공용 시나리오)
+uv run python -m pipeline.recheck --file 문서.md      # 재학습·규칙 수정 뒤 일괄 재검사 (⑦)
+uv run pytest                             # 계약·통합 테스트 (스텁). 진짜 부품: -m needs_model
+```
+
+- 통합 설계·결정 기록: `docs/decisions.md` ⑧~⑫ (초안 — 전원 리뷰 대상)
+- 파이프라인 코드: `pipeline/` (오케스트레이터·판정 합치기·정책 엔진·회로 차단기·판정 저장)
+- 작은 RAG·시연 시나리오: `rag/`, `rag/scenario_data/scenarios.jsonl`

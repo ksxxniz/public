@@ -40,6 +40,9 @@ def check_chunk(chunk: Chunk) -> StageResult:
         key=lambda h: h.weight,
         default=None,
     )
+    # (0.3.0, common PR 2) 걸린 위치 전부. 숨김 구간 두 곳에 나눠 넣은 공격이
+    # 한 곳만 지워지지 않도록 마스킹이 이 목록을 쓴다.
+    spans = sorted({(h.span.start, h.span.end) for h in best.values() if h.span is not None})
     return StageResult(
         stage="rule",
         label="injection" if risk >= R.INJECTION_AT else "benign",
@@ -48,6 +51,7 @@ def check_chunk(chunk: Chunk) -> StageResult:
         reason=_reason(best),
         attack_type=keyword.attack_type if keyword else None,
         evidence_span=top.span if top else None,
+        evidence_spans=[Span(start=s, end=e) for s, e in spans],
         latency_ms=(time.perf_counter() - started) * 1000,
         model_ver=R.RULE_VERSION,
     )
