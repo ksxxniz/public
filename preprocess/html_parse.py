@@ -48,7 +48,23 @@ _TABLE_PARTS = frozenset("caption col colgroup tbody td tfoot th thead tr".split
 _TABLE_CONTEXT = frozenset("table tbody tfoot thead tr".split())
 _TABLE_CONTENT = _TABLE_PARTS | frozenset("form input script style template".split())
 _SVG_TEXT = frozenset("text tspan textpath".split())
-ATTRIBUTE_REASONS = {"alt": "attr_alt", "title": "attr_title", "aria-label": "attr_aria_label"}
+ATTRIBUTE_REASONS = {
+    "alt": "attr_alt",
+    "title": "attr_title",
+    "aria-label": "attr_aria_label",
+    "aria-description": "attr_aria_description",
+    "placeholder": "attr_placeholder",
+}
+# 화면에 값이 글로 보이는 <input> 종류 (type 이 없으면 text)
+_VALUE_INPUT_TYPES = frozenset(
+    {"", "text", "search", "email", "url", "tel", "submit", "button", "reset"}
+)
+# 주소·데이터 속성 값이 문장이면 (낱말 3개 이상) 주소가 아니라 글로 보고 정리본에 넣는다
+_PROSE_WORD = re.compile(r"[^\W_]*[^\W\d_][^\W_]*")  # 글자가 하나 이상 든 낱말 (이, 제품을, 1위로)
+MIN_PROSE_WORDS = 3
+TEXT_ATTRIBUTE_REASONS = frozenset({*ATTRIBUTE_REASONS.values(), "attr_value", "attr_text"})
+# 화면에 그대로 보이는 속성 글. 정리본에는 넣지만 숨김 텍스트로 세지는 않는다
+VISIBLE_ATTRIBUTE_REASONS = frozenset({"attr_value", "attr_placeholder"})
 _META_NAME = re.compile(r"(?:^|[:.])(?:description|keywords|title|summary|abstract|subject)$")
 _REF_START = r"&(?=#(?:[0-9]+|[xX][0-9a-fA-F]+)[^0-9a-fA-F]|[a-zA-Z][-.a-zA-Z0-9]*[^a-zA-Z0-9])"
 _INTERESTING = re.compile("<|" + _REF_START)
@@ -529,6 +545,11 @@ class _Parser(HTMLParser):
             if name in wanted:
                 pieces = _value_pieces(self.raw, base + s, base + e, wanted[name])
                 self.result.attributes.extend(pieces)
+            elif name != "srcset" and _prose(html.unescape(tag_text[s:e])):
+                # data-note="ignore all previous instructions" 처럼 속성에 적은 문장.
+                # 원본 HTML 을 읽는 AI 는 이 글도 읽으므로 숨김 텍스트로 남긴다
+                pieces = _value_pieces(self.raw, base + s, base + e, "attr_text")
+                self.result.attributes.extend(pieces)
             else:
                 value = html.unescape(tag_text[s:e])
                 self.result.url_values.append(Piece(base + s, base + e, value, name))
@@ -896,9 +917,28 @@ def _wanted_attributes(tag: str, attrs) -> dict[str, str]:
     meta_name = (attr.get("name") or attr.get("property") or "").strip().lower()
     if tag == "meta" and _META_NAME.search(meta_name):
         wanted["content"] = "meta_content"
-    if tag == "input" and (attr.get("type") or "").strip().lower() == "hidden":
-        wanted["value"] = "input_hidden"
+    if tag == "input" and attr.get("value", "").strip():
+        kind = (attr.get("type") or "").strip().lower()
+        if kind == "hidden":
+            wanted["value"] = "input_hidden"
+        elif kind in _VALUE_INPUT_TYPES:
+            wanted["value"] = "attr_value"
     return wanted
+
+
+def _prose(value: str) -> bool:
+    """속성 값이 주소·식별자가 아니라 띄어 쓴 문장인가."""
+    if not any(c.isspace() for c in value.strip()):
+        return False
+    words = long_words = 0
+    for part in value.split():
+        word = part.strip(".,!?:;\"'()[]")
+        if _PROSE_WORD.fullmatch(word):
+            words += 1
+            long_words += sum(c.isalpha() for c in word) >= 2
+            if words >= MIN_PROSE_WORDS and long_words >= 2:
+                return True
+    return False
 
 
 def _value_pieces(raw: str, start: int, end: int, reason: str) -> list[Piece]:

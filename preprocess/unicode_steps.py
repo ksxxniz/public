@@ -1,13 +1,16 @@
-"""③ 유니코드 정규화 단계 7개. normalize.STEPS 에 이 순서대로 들어간다.
+"""③ 유니코드 정규화 단계. normalize.STEPS 에 이 순서대로 들어간다.
 
   1. decode_tag_chars   태그 문자 해독        → tag_chars_decoded, decoded_segments
   2. decode_variation_selectors  변형 선택자로 숨긴 바이트 해독 → decoded_segments
   3. remove_bidi        양방향 제어문자 제거   → bidi_removed
   4. remove_invisible   보이지 않는 문자 제거  → zero_width_removed, hangul_filler_removed,
                                                   variation_selector_removed, emoji_zwj
-  5. apply_nfkc         NFKC (호환 자모는 건드리지 않음) → nfkc_changed
-  6. assemble_jamo      쪼갠 자모 조립 (ㄱㅗㅇㄱㅕㄱ → 공격) → jamo_assembled
-  7. tidy_whitespace    줄바꿈·공백 정리 (기록 안 함, 의심 신호가 아님)
+  5. strip_combining_noise  글자에 겹쳐 쓴 결합 문자 제거 (i̶g̶n̶, 잘고 글씨) → combining_removed
+  6. (homoglyph.fold_enclosed_letters  둘러싼 글자 🅸🅶🅽 → IGN)
+  7. apply_nfkc         NFKC (호환 자모는 건드리지 않음) → nfkc_changed
+  8. (homoglyph.replace_homoglyphs)
+  9. assemble_jamo      쪼갠 자모 조립 (ㄱㅗㅇㄱㅕㄱ → 공격) → jamo_assembled
+ 10. tidy_whitespace    줄바꿈·공백 정리 (기록 안 함, 의심 신호가 아님)
 
 순서가 중요하다. 태그 문자와 양방향 제어문자도 유니코드 분류가 Cf(형식 문자)라서,
 3번의 "Cf 는 지운다" 규칙이 먼저 돌면 태그 문자는 해독 전에 사라지고 양방향 제어문자는
@@ -21,6 +24,7 @@ from itertools import accumulate
 
 from preprocess.context import MAX_DOCUMENT_CHARS, Context, DocumentTooLongError
 from preprocess.encoding import _acceptable, _bytes_text
+from preprocess.homoglyph import enclosed_letter
 from preprocess.tracked import Edit
 
 # ── 1. 태그 문자 ──
@@ -235,7 +239,85 @@ def remove_invisible(ctx: Context) -> None:
         ctx.record(kind, kind_spans)
 
 
-# ── 4. NFKC ──
+# ── 4. 겹쳐 쓴 결합 문자 ──
+
+# 글자 가운데를 긋거나 덮는 부호. 악센트와 달리 글자의 뜻을 바꾸지 않고 모양만 가린다
+_OVERLAY_MARKS = frozenset(
+    "\u0334\u0335\u0336\u0337\u0338\u20d2\u20d3\u20d8\u20d9\u20da\u20e5\u20e6\u20ea\u20eb"
+)
+_MARK_CHARS = "".join(
+    chr(cp) for cp in range(0x300, 0x20000) if unicodedata.category(chr(cp)) in ("Mn", "Me")
+)
+_MARK_CHARS_SET = frozenset(_MARK_CHARS)
+_MARK_RUN = re.compile("[" + _MARK_CHARS + "]+")
+# 빠른 사전 검사. 기본 평면 밖 글자가 든 문자 집합은 느려서, 대부분의 문서(부호 없음)는
+# 기본 평면 부호만 든 정규식으로 먼저 걸러 낸다
+_BMP_MARK = re.compile("[" + "".join(c for c in _MARK_CHARS if c <= "\uffff") + "]")
+_ASTRAL = re.compile("[\U00010000-\U0010ffff]")
+# 한 글자에 부호가 이만큼 쌓이면 잘고(zalgo) 글씨로 본다. 베트남어는 2개까지, 고전
+# 그리스어는 3개까지 정상이라 문자 체계마다 기준이 다르다. 그 밖의 문자(아랍·히브리·
+# 인도계 등)는 부호를 많이 쌓는 게 정상이라 보지 않는다
+_STACK_LIMIT = {"LATIN": 3, "CYRILLIC": 3, "HANGUL": 3, "DIGIT": 3, "GREEK": 4}
+
+
+def _is_overlay(ch: str) -> bool:
+    # 둘러싸는 부호(Me)도 글자를 가린다. 키캡(1️⃣)의 U+20E3 은 정상 이모지라 뺀다
+    return ch in _OVERLAY_MARKS or (unicodedata.category(ch) == "Me" and ch != _KEYCAP)
+
+
+def _stack_limit(base: str) -> int | None:
+    return _STACK_LIMIT.get(unicodedata.name(base, "").split(" ", 1)[0])
+
+
+def _plain_base(base: str) -> str | None:
+    """부호가 붙은 글자가 글자·숫자면 그 글자를, 아니면 None 을 돌려준다.
+
+    뒤 단계에서 글자가 되는 것(ⓘ, 🅸, ｉ)도 글자로 본다. 그래야 정규화를 두 번 해도 같다.
+    """
+    if base.isalnum():
+        return base
+    folded = enclosed_letter(base) or next((c for c in _nfkc(base) if c.isalnum()), None)
+    return folded
+
+
+def strip_combining_noise(ctx: Context) -> None:
+    """글자·숫자에 겹쳐 쓴 결합 문자를 지운다. i̶g̶n̶o̶r̶e̶ → ignore, 무̶시̶ → 무시.
+
+    사람과 AI 는 이런 글을 그대로 읽지만 분류기 토큰은 전혀 달라진다. 정상 악센트
+    (é, ệ, й)는 건드리지 않는다. 가운데를 긋거나 둘러싸는 부호만 지우고, 한 글자에
+    부호가 3개 이상 쌓였을 때만 (잘고 글씨) 그 글자의 부호를 모두 지운다.
+    알려진 한계: 글자마다 악센트를 하나씩 붙인 글(íǵńóŕé)은 정상 악센트와 구별할 수 없다.
+    """
+    text = ctx.tt.text
+    if not _BMP_MARK.search(text) and not _ASTRAL.search(text):
+        return
+    edits: list[Edit] = []
+    for m in _MARK_RUN.finditer(text):
+        if m.start() == 0:
+            continue
+        base = _plain_base(text[m.start() - 1])
+        if base is None:
+            continue
+        marks = m.group()
+        limit = _stack_limit(base)
+        if limit is not None:
+            nfd = unicodedata.normalize("NFD", base)
+            in_base = sum(1 for c in nfd[1:] if c in _MARK_CHARS_SET)
+            if len(marks) + in_base >= limit:
+                if in_base and in_base == len(nfd) - 1 and base == text[m.start() - 1]:
+                    # 악센트가 붙은 완성형 글자(ì)에 부호를 더 쌓은 것. 맨글자만 남긴다
+                    edits.append(Edit(m.start() - 1, m.end(), nfd[0], block=True))
+                else:
+                    edits.append(Edit(m.start(), m.end(), ""))
+                continue
+        for offset, ch in enumerate(marks):
+            if _is_overlay(ch):
+                edits.append(Edit(m.start() + offset, m.start() + offset + 1, ""))
+    if edits:
+        ctx.record("combining_removed", ctx.tt.apply(edits))
+
+
+# ── 5. NFKC ──
 
 
 def _is_conjoining_jamo(ch: str) -> bool:
@@ -442,7 +524,7 @@ def apply_nfkc(ctx: Context) -> None:
     ctx.record("nfkc_changed", ctx.tt.apply(edits))
 
 
-# ── 5. 자모 조립 ──
+# ── 6. 자모 조립 ──
 
 _CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
 _JUNG = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ"
@@ -542,7 +624,7 @@ def assemble_jamo(ctx: Context) -> None:
     ctx.record("jamo_assembled", ctx.tt.apply(edits))
 
 
-# ── 5. 공백 정리 ──
+# ── 7. 공백 정리 ──
 
 
 def tidy_whitespace(ctx: Context) -> None:

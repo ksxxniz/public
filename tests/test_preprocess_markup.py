@@ -109,7 +109,7 @@ def test_attribute_entities_are_decoded():
     [
         pytest.param('<meta name="viewport" content="width=device-width">', id="viewport"),
         pytest.param('<meta charset="utf-8">', id="charset"),
-        pytest.param('<input type="text" value="보이는 값">', id="visible-input"),
+        pytest.param('<input type="checkbox" value="on">', id="checkbox-value"),
         pytest.param('<img alt="  ">', id="blank-alt"),
         pytest.param('<p class="note" id="x" data-x="y">본문</p>', id="other-attrs"),
     ],
