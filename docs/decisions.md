@@ -60,3 +60,10 @@
 - (2026-10-26 확정) 복원 결과(`decoded_segments`)는 하나씩 따로 1차 분류기에 넣습니다. 한 청크의 복원 결과를 이어 붙이지 않습니다. 384토큰을 넘는 복원 결과는 청크와 같은 방식(384토큰, 50토큰 겹침)으로 자르고, 잘린 조각은 모두 그 복원 결과의 원문 인코딩 구간 전체(`span`)를 위치로 씁니다. 긴 Base64 덩어리 전체가 하이라이트되지만 틀린 위치는 아닙니다. 학습 데이터에도 복원 결과를 넣어 서빙과 같게 합니다. 서빙과 학습 모두 `preprocess.decoded` 의 `decoded_inputs`(청크 하나)·`decoded_texts`(학습 샘플 하나)로 같은 조각을 만듭니다. `html_entity`·`unicode_escape` 는 표기가 있는 줄 전체를 푼 글이라 앞뒤의 평범한 글도 함께 들어갑니다.
 - (2026-10-31 추가, 정규화 1.1) ② HTML 숨김 판정에 `<style>` 블록의 단순 선택자 규칙(태그·클래스·ID, `@media` 안 포함)을 더합니다. 자손 선택자 등은 보지 않습니다. `href`·`src`·`data-*` 같은 주소·데이터 속성 값은 정리본에 넣지 않고 그 안의 인코딩만 ⑤ 에서 풀어 `decoded_segments` 에 넣습니다. 자리표시자나 긴 쿼리 값이 붙은 외부 이미지 주소(`<img src>`, MD 이미지)는 `hidden_text_found`(note `exfil_image`)로 표시합니다. ③ 에서 변형 선택자 3개 이상으로 숨긴 바이트를 해독해 `decoded_segments`(method `variation_selector`)에 넣습니다. 이 method 값을 위해 `common/schema.py` 의 `DecodedSegment.method` 에 `variation_selector` 를 더하고 `SCHEMA_VERSION` 을 0.2.4 로 올립니다. ④ 에서 키릴·그리스 문자로만 쓴 단어도 공격 키워드 목록(`preprocess.homoglyph.KEYWORDS`)에 있는 단어로 읽힐 때만 라틴 문자로 바꿉니다.
 - 관련 코드: `common/schema.py` → `TransformLog`, `TransformSpan`, `DecodedSegment`
+
+## ⑦ 2차 판정 실패 처리 (제안: 4단계 D)
+
+- LLM 답변(JSON)을 읽지 못하면 1번 다시 묻고, 그래도 못 읽으면 차단합니다(fail-closed): `label="injection"`, `risk_score=1.0`, `confidence=0.0`.
+- LLM 이 인용한 근거 문장을 `preprocess.quote.find_quote` 로 원문에서 찾지 못하면, 판정은 그대로 두고 `evidence_span` 만 비웁니다. 판정을 바꾸면 실제 공격을 놓칠 수 있기 때문입니다.
+- 2차 서버가 응답하지 않을 때(fail-open / fail-closed)는 통합 담당과 확정합니다.
+- 관련 코드: `stage2_llm/judge.py`, `stage2_llm/config.py` → `MAX_RETRIES`
