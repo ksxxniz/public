@@ -107,7 +107,7 @@ def signal_hits(chunk: Chunk) -> list[Hit]:
     if log.tag_chars_decoded >= 1:
         add(R.SIG_TAG, _first_segment(chunk, "unicode_tag"))
     zw_rate = log.zero_width_removed * per_k
-    if zw_rate >= R.ZW_PER_K:
+    if zw_rate >= R.ZW_PER_K and log.zero_width_removed >= R.ZW_MIN:
         add(R.SIG_ZW, _first_span(chunk, "zero_width_removed"))
     elif zw_rate >= R.ZW_LOW_PER_K:
         add(R.SIG_ZW_LOW, _first_span(chunk, "zero_width_removed"))
@@ -122,14 +122,86 @@ def signal_hits(chunk: Chunk) -> list[Hit]:
     # 아랍어·히브리어 문서에는 방향 제어문자가 정상으로 있다
     if log.bidi_removed >= 1 and not R.RTL_SCRIPT.search(chunk.text):
         add(R.SIG_BIDI, _first_span(chunk, "bidi_removed"))
+    styled = R.STYLED_CHARS.findall(chunk.raw_text)
+    if len(styled) >= R.STYLED_MIN:
+        add(R.SIG_STYLED, None)
+    if len(R.NFD_JAMO.findall(chunk.raw_text)) >= R.NFD_MIN:
+        add(R.SIG_NFD, None)
     for ts in chunk.transform_spans:
         if ts.kind != "hidden_text_found":
             continue
         if ts.note in R.DELIBERATE:
             add(R.SIG_HIDE, ts.span)
+            hidden = _plain(chunk.raw_text[ts.span.start : ts.span.end])
+            # 숨긴 FAQ 답("~하세요", "You should ~")은 정상 웹에도 흔하다. AI 를 지목할 때만 센다
+            if _is_sentence(hidden) and R.AI_ADDRESS.search(hidden):
+                add(R.SIG_HIDE_TEXT, ts.span)
         elif ts.note in R.COMMENTS:
             add(R.SIG_COMMENT, ts.span)
+            # 개발자 주석("수정하지 마세요")도 지시문이라, 점수를 낮게 두고 2차에 맡긴다
+            hidden = _plain(chunk.raw_text[ts.span.start : ts.span.end])
+            directive = R.IMPERATIVE.search(hidden) or R.AI_ADDRESS.search(hidden)
+            if _is_sentence(hidden) and (directive or R.SECOND_PERSON.search(hidden)):
+                add(R.SIG_COMMENT_TEXT, ts.span)
+        elif ts.note in R.EXFIL:
+            if R.EXFIL_PLACEHOLDER.search(chunk.raw_text[ts.span.start : ts.span.end]):
+                add(R.SIG_EXFIL, ts.span)
+    out += decoded_hits(chunk)
     return out
+
+
+def decoded_hits(chunk: Chunk) -> list[Hit]:
+    """복원해야만 보이는 문장이 있으면 신호. 키·해시·JSON·주소는 정상 문서에도 흔해서 뺀다.
+    html_entity·unicode_escape 는 줄 전체를 풀어서 보이는 글도 섞이므로,
+    본문(text)에 없던 단어만 센다 (이 방식은 모든 복원 방법에 똑같이 쓴다)"""
+    out: list[Hit] = []
+    seen: set[str] | None = None
+    for seg in chunk.decoded_segments:
+        if seg.method == "unicode_tag":  # SIG-TAG 가 따로 있다
+            continue
+        if seen is None:
+            seen = set(R.WORD.findall(chunk.text))
+        if not _hidden_sentence(seg.decoded, seen):
+            continue
+        half = _example_context(chunk.raw_text, seg.span.start, seg.span.end)
+        nested = seg.depth >= 2
+        rules = (R.SIG_DECODED_TEXT, R.SIG_DECODED_NESTED) if nested else (R.SIG_DECODED_TEXT,)
+        for rule in rules:
+            out.append(Hit(rule[0], rule[1] / 2 if half else rule[1], None, seg.span))
+    return out
+
+
+def _hidden_sentence(decoded: str, seen: set[str]) -> bool:
+    if sum(c.isspace() for c in decoded) < R.PROSE_MIN_SPACES:
+        return False
+    if R.JSON_LIKE.match(decoded):
+        return False
+    url_chars = sum(len(m) for m in R.URL_TOKEN.findall(decoded))
+    if url_chars > R.URL_MAX_SHARE * len(decoded):
+        return False
+    new_words = [w for w in R.WORD.findall(decoded) if w not in seen]
+    return len(new_words) >= R.PROSE_MIN_WORDS
+
+
+_TAG = re.compile(r"<[^<>]{0,500}>")
+
+
+def _plain(raw: str) -> str:
+    return _TAG.sub(" ", raw)
+
+
+def _is_sentence(s: str) -> bool:
+    """단어가 여럿이고 문자 비율이 높은 글"""
+    if len(R.WORD.findall(s)) < R.PROSE_MIN_WORDS:
+        return False
+    chars = [c for c in s if not c.isspace()]
+    letters = sum(c.isalpha() for c in chars)
+    return letters >= R.PROSE_MIN_LETTERS * max(len(chars), 1)
+
+
+def _example_context(raw: str, start: int, end: int) -> bool:
+    """인코딩 문자열이 따옴표·코드 블록 안이거나 예시 표시 근처인가 (보안 교육 글의 예시)"""
+    return raw[:start].count(R.CODE_FENCE) % 2 == 1 or _quoted(raw, start, end)
 
 
 def _first_span(chunk: Chunk, kind: str) -> Span | None:
@@ -163,7 +235,10 @@ def keyword_hits(chunk: Chunk) -> list[Hit]:
             # html_entity·unicode_escape 는 줄 전체를 풀어서 평범한 글도 들어 있다.
             # 본문에 그대로 있는 문구는 숨긴 게 아니므로 본문 규칙에 맡긴다
             if m and m.group() not in chunk.text:
-                out.append(Hit(rule.id + "+decoded", R.STRONG, rule.attack_type, seg.span))
+                # 결정 ⑨: 보안 교육 글의 인코딩 예시는 점수 절반 (본문 인용문과 같은 규칙)
+                half = _example_context(chunk.raw_text, seg.span.start, seg.span.end)
+                weight = R.STRONG / 2 if half else R.STRONG
+                out.append(Hit(rule.id + "+decoded", weight, rule.attack_type, seg.span))
     out += skeleton_hits(chunk, {h.rule.split("+")[0] for h in out})
     return out
 
