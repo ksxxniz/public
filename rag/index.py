@@ -47,6 +47,10 @@ class SimpleIndex:
             self._vectors.append(_grams(c.text))
 
     def query(self, question: str, k: int = 4) -> list[Entry]:
+        return [e for _, e in self.query_scored(question, k)]
+
+    def query_scored(self, question: str, k: int = 4) -> list[tuple[float, Entry]]:
+        """(유사도, 조각) 목록. 유사도는 0~1 코사인. 화면에 검색 순위 근거로 보여 준다"""
         q = _grams(question)
         qn = math.sqrt(sum(v * v for v in q.values())) or 1.0
         scored = []
@@ -55,7 +59,7 @@ class SimpleIndex:
             norm = math.sqrt(sum(v * v for v in vec.values())) or 1.0
             scored.append((dot / (norm * qn), entry))
         scored.sort(key=lambda t: -t[0])
-        return [e for _, e in scored[:k]]
+        return scored[:k]
 
 
 class ChromaIndex:

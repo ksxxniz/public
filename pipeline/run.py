@@ -13,6 +13,7 @@ import json
 import sys
 
 from common import config, logdb
+from common.console import safe_stdio
 from pipeline.components import ComponentUnavailable, load_stage1, load_stage2
 from pipeline.orchestrator import Orchestrator
 
@@ -104,6 +105,7 @@ def main(argv: list[str] | None = None) -> None:
     from preprocess.chunk import DocumentTooLongError
     from preprocess.load import UnsupportedDocumentError, read_document
 
+    safe_stdio()
     parser = argparse.ArgumentParser(description="prompt-injection-protection 파이프라인")
     parser.add_argument("--file", required=True, nargs="+", help="검사할 문서 경로")
     parser.add_argument("--json", action="store_true")

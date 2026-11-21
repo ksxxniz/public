@@ -24,6 +24,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from common.console import safe_stdio
 from pipeline.orchestrator import DocumentReport, Orchestrator
 from rag.index import SimpleIndex
 
@@ -97,11 +98,19 @@ def stub_answer(question: str, contexts: list[str]) -> str:
     m = _FORCE.search(joined)
     if m:
         return m.group(1).strip()
-    keys = [w for w in re.findall(r"[가-힣A-Za-z0-9]+", question) if len(w) >= 2]
-    for sent in _SENT.split(joined):
-        if any(k in sent for k in keys):
-            return sent.strip()
-    return "문서에서 답을 찾지 못했습니다."
+    # 질문과 글자 3-그램이 가장 많이 겹치는 문장 두 개를 문서 순서대로 돌려준다
+    question_grams = _grams3(question)
+    sents = [s.strip() for s in _SENT.split(joined) if s.strip()]
+    scored = [(len(question_grams & _grams3(s)), i, s) for i, s in enumerate(sents)]
+    best = sorted((t for t in scored if t[0] > 0), key=lambda t: (-t[0], t[1]))[:2]
+    if not best:
+        return "문서에서 답을 찾지 못했습니다."
+    return " ".join(s for _, _, s in sorted(best, key=lambda t: t[1]))
+
+
+def _grams3(text: str) -> set[str]:
+    t = re.sub(r"\s+", " ", text.strip())
+    return {t[i : i + 3] for i in range(len(t) - 2)}
 
 
 class OllamaAnswerer:
@@ -197,6 +206,7 @@ def run_scenario(scenario: dict, orch: Orchestrator, answerer, k: int = 4) -> di
 def main(argv: list[str] | None = None) -> None:
     from pipeline.run import add_component_args, build
 
+    safe_stdio()
     parser = argparse.ArgumentParser(description="작은 RAG 방어 ON/OFF 시연 (①)")
     parser.add_argument("--regen", action="store_true", help="시나리오 문서를 다시 만든다")
     parser.add_argument("--answer", choices=["stub", "real"], default="stub")
