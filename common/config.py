@@ -47,3 +47,28 @@ TOKENIZER_NAME = "xlm-roberta-base"
 # ── 결정 ⑤ 실험 기록 ──
 WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "rag-guard")
 WANDB_ENTITY = os.environ.get("WANDB_ENTITY")  # 팀 공용 계정
+
+# ── 결정 ⑧ 파이프라인 경계값 (5단계 ④·⑤) — 초기값, 부하 테스트·팀 확정 뒤 고친다 ──
+# 1차 점수가 [THETA_LOW, THETA_HIGH) 면 애매 → 2차. THETA_HIGH 이상이면 공격 확정.
+THETA_LOW = 0.30
+THETA_HIGH = 0.80
+# 룰 점수가 이 값 '초과'면 2차에 보낸다 (주석 신호 SIG-COMMENT 가 정확히 0.3 이라
+# "이상"으로 두면 HTML 주석 하나 있는 정상 문서도 2차로 간다. 5단계 가이드 ④).
+RULE_TO_STAGE2 = 0.30
+RULE_WARN = 0.70  # 2차가 정상이라 해도 룰이 이 값 이상이면 "경고"
+RULE_BLOCK = 0.90  # 이 값 이상이면 2차 결과와 상관없이 공격 (결정 ⑨)
+
+# ── 결정 ⑨ 정책 기본값 (5단계 ⑤) ──
+# 공격 판정 조각의 처리: "mask" | "block" | "warn". 마스킹할 위치가 없으면 block 으로 떨어진다.
+DEFAULT_POLICY = "mask"
+MASK_MARKER = "[삭제된 내용]"  # 답변 LLM 입력에서 공격 구간 자리에 넣는 표시
+
+# ── 결정 ⑩ 장애 정책 (5단계 ⑥) — 인프라 장애의 합의 fail-safe. 초기값은 경고 통과 ──
+# "warn": 통과시키되 경고 표시 + 재검사 대상으로 로그에 남김 / "block": 차단
+FAIL_SAFE_ACTION = "warn"
+
+# ── 결정 ⑪ 2차 호출 상한·타임아웃·회로 차단기 (5단계 ④) — 부하 테스트 뒤 고친다 ──
+STAGE2_TIMEOUT_S = 30.0  # 2차 요청 하나의 상한
+STAGE2_MAX_CONCURRENT = 4  # 동시에 보낼 2차 요청 수 상한
+CIRCUIT_FAIL_THRESHOLD = 5  # 연속 실패 n 번이면 회로 열림
+CIRCUIT_COOLDOWN_S = 30.0  # 열린 뒤 이 시간 동안 2차를 부르지 않음

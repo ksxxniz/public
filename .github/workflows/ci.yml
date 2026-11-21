@@ -28,7 +28,13 @@ jobs:
       - name: pytest
         run: uv run pytest -v
 
-      - name: pipeline.run 스모크 테스트
+      - name: pipeline.run 스모크 테스트 (정상 문서)
         run: |
           echo "연차는 1년에 15일입니다." > /tmp/sample.txt
-          uv run python -m pipeline.run --file /tmp/sample.txt
+          uv run python -m pipeline.run --file /tmp/sample.txt --no-db
+
+      - name: pipeline.run 스모크 테스트 (공격 문서, 스텁 부품)
+        run: uv run python -m pipeline.run --file rag/scenario_data/leave_plain.txt --no-db
+
+      - name: 작은 RAG 방어 ON/OFF 스모크 (시연 시나리오 전부, 실패 시 종료 코드 1)
+        run: uv run python -m rag.demo

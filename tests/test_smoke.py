@@ -36,15 +36,17 @@ def test_split_document_short_text_is_one_chunk():
 
 
 def _run(monkeypatch, path):
-    monkeypatch.setattr(sys, "argv", ["pipeline.run", "--file", str(path)])
+    monkeypatch.setattr(sys, "argv", ["pipeline.run", "--file", str(path), "--no-db"])
     run_main()
 
 
-def test_run_prints_chunks(monkeypatch, capsys, tmp_path):
+def test_run_prints_verdict(monkeypatch, capsys, tmp_path):
     path = tmp_path / "rule.txt"
     path.write_text("연차는 1년에 15일입니다.", encoding="utf-8")
     _run(monkeypatch, path)
-    assert "rule (txt, utf-8): 1개 청크" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "최종 benign / 조치 allow" in out
+    assert "rule-c0" in out
 
 
 @pytest.mark.parametrize(
@@ -78,7 +80,7 @@ def test_run_reports_tokenizer_failure_not_missing_file(monkeypatch, capsys, tmp
 def test_run_reports_too_long_document(monkeypatch, capsys, tmp_path):
     path = tmp_path / "long.txt"
     path.write_text("가나다 " * 400, encoding="utf-8")
-    monkeypatch.setattr("pipeline.run.split_document", _split_with_limit_one)
+    monkeypatch.setattr("preprocess.chunk.split_document", _split_with_limit_one)
     with pytest.raises(SystemExit) as exc:
         _run(monkeypatch, path)
     assert exc.value.code == 2

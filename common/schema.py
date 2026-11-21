@@ -22,7 +22,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "0.2.5"
+SCHEMA_VERSION = "0.3.0"
 
 Label = Literal["benign", "injection"]
 Stage = Literal["preprocess", "rule", "stage1", "stage2"]
@@ -160,7 +160,14 @@ class StageResult(_Model):
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str = ""
     attack_type: str | None = None
-    evidence_span: Span | None = None  # raw_text 기준
+    evidence_span: Span | None = None  # raw_text 기준. evidence_spans 의 대표 하나
+    # (0.3.0, common PR 2) 걸린 위치 전부. raw_text 기준.
+    # 룰 필터는 걸린 규칙의 위치 전부를, 2차는 인용문 여러 개를 담는다.
+    # 숨김 구간 두 곳에 나눠 넣은 공격이 한 곳만 지워지는 것을 막기 위한 칸.
+    evidence_spans: list[Span] = Field(default_factory=list)
+    # (0.3.0, common PR 3) 장애 처리(fail-safe)로 만들어진 결과인가.
+    # True 면 판정 저장(캐시)에 쓰지 않는다 (결정 ⑥-라).
+    fallback: bool = False
     latency_ms: float = Field(ge=0.0)
     model_ver: str
 
@@ -172,7 +179,17 @@ class Verdict(_Model):
     action: Action
     path: list[Stage]  # 예: ["preprocess","stage1"] ← 2차 안 감
     stage_results: list[StageResult]
+    # (0.3.0, common PR 1) 마스킹으로 지울 구간. chunk.raw_text 기준.
+    # action 이 "mask" 일 때 채워진다. 화면 하이라이트에도 쓴다.
+    masked_spans: list[Span] = Field(default_factory=list)
+    # (0.3.0, common PR 1·⑦) 이 판정을 만든 파이프라인 구성. 재사용 판단 기준.
+    pipeline_ver: str = ""
+    # (0.3.0, ⑦) 저장된 판정을 재사용했는가. 지연 그래프에서 따로 보기 위한 표시.
+    cache_hit: bool = False
+    # (0.3.0, common PR 3·⑥) 장애 처리로 내려진 판정인가. True 면 저장하지 않는다.
+    fallback: bool = False
     total_latency_ms: float = Field(ge=0.0)
+    meta: dict = Field(default_factory=dict)  # 예: 합치기 표의 어느 줄에 맞았나
 
     @model_validator(mode="after")
     def _check_path(self):
@@ -180,3 +197,22 @@ class Verdict(_Model):
         if missing:
             raise ValueError(f"stage_results 의 단계 {missing} 가 path 에 없습니다")
         return self
+
+
+class DocumentVerdict(_Model):
+    """문서 단위 결과 (0.3.0, common PR 4).
+
+    attack_spans_raw 는 공격 구간의 '문서 원문 좌표' 합집합이다. 조각 좌표에
+    chunk.span.start 를 더해 만들고, 겹치는 구간은 합친다. 조각이 50토큰씩
+    겹치므로 같은 공격 문장이 두 조각에 나올 수 있는데, 이 합집합을 문서의
+    모든 조각에 적용하는 것이 곧 겹침 중복 제거다 (결정 ⑤)."""
+
+    doc_id: str
+    final_label: Label
+    action: Action
+    attack_spans_raw: list[Span] = Field(default_factory=list)  # 문서 원문 좌표
+    verdicts: list[Verdict] = Field(default_factory=list)  # 조각별 판정
+    pipeline_ver: str = ""
+    fallback: bool = False
+    total_latency_ms: float = Field(ge=0.0)
+    meta: dict = Field(default_factory=dict)  # 예: 문서 전체 차단 사유 (⑥)
