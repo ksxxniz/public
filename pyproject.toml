@@ -7,17 +7,28 @@ requires-python = ">=3.11"
 dependencies = [
     "charset-normalizer>=3.5.2",
     "confusable-homoglyphs>=3.3.1",
+    "fastapi>=0.115",  # 시연 화면·API (python -m web)
     "numpy>=1.26",
+    "ollama>=0.6.3",
     "pydantic>=2.6",
     "rapidfuzz>=3.14.6",
     "tokenizers>=0.23.2",
+    "uvicorn>=0.30",  # 시연 화면·API 서버
 ]
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.0",  # 화면 API 테스트(starlette TestClient)
     "hypothesis>=6.168.3",
     "pytest>=8.0",
     "ruff>=0.5",
+]
+# 1차 진짜 부품(--stage1 real, stage1.train)용. 기본 설치에는 들어가지 않는다:
+#   uv sync --group stage1
+stage1 = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "wandb>=0.17",
 ]
 
 [tool.uv]

@@ -1,0 +1,305 @@
+"""룰 필터. 전처리가 만든 Chunk 를 받아 StageResult(stage="rule") 를 돌려준다.
+
+규칙은 두 가지다.
+- 신호 규칙: 전처리가 남긴 개수(transform_log)·숨김 이유(transform_spans)로
+  "일부러 숨긴" 흔적을 잡는다.
+- 키워드 규칙: 정리본(text)·복원 결과(decoded_segments)·골격 보기에서
+  전형적인 공격 문구를 찾는다.
+
+점수는 risk = 1 - ∏(1 - w) 로 합친다. 같은 규칙 id 는 가장 높은 점수 하나만 쓴다.
+룰 점수는 1차 분류기 입력에 넣지 않는다. 규칙 표는 rule/rules.py.
+"""
+
+import re
+import time
+from dataclasses import dataclass
+
+from common.schema import Chunk, Span, StageResult
+from rule import rules as R
+
+
+@dataclass(frozen=True)
+class Hit:
+    rule: str  # 규칙 id. 찾은 곳에 따라 +hidden, +decoded, +skeleton 이 붙는다
+    weight: float
+    attack_type: str | None  # 신호 규칙은 None
+    span: Span | None  # raw_text 기준
+
+
+def check_chunk(chunk: Chunk) -> StageResult:
+    return check_chunk_with_hits(chunk)[0]
+
+
+def check_chunk_with_hits(chunk: Chunk) -> tuple[StageResult, list[Hit]]:
+    """check_chunk 와 같은 판정에, 키워드 규칙이 걸린 위치 목록을 함께 돌려준다.
+    파이프라인의 마스킹이 이 목록을 써서 룰 필터를 두 번 돌리지 않는다"""
+    started = time.perf_counter()
+    keywords = keyword_hits(chunk)
+    best = strongest_per_rule(signal_hits(chunk) + keywords)
+    risk = combine(best.values())
+    top = max(
+        best.values(),
+        key=lambda h: (h.weight, h.attack_type is not None, h.span is not None),
+        default=None,
+    )
+    keyword = max(
+        (h for h in best.values() if h.attack_type is not None),
+        key=lambda h: h.weight,
+        default=None,
+    )
+    # (0.3.0, common PR 2) 걸린 위치 전부. 숨김 구간 두 곳에 나눠 넣은 공격이
+    # 한 곳만 지워지지 않도록 마스킹이 이 목록을 쓴다.
+    spans = sorted({(h.span.start, h.span.end) for h in best.values() if h.span is not None})
+    result = StageResult(
+        stage="rule",
+        label="injection" if risk >= R.INJECTION_AT else "benign",
+        risk_score=round(risk, 4),
+        confidence=top.weight if top else R.NO_HIT_CONFIDENCE,
+        reason=_reason(best),
+        attack_type=keyword.attack_type if keyword else None,
+        evidence_span=top.span if top else None,
+        evidence_spans=[Span(start=s, end=e) for s, e in spans],
+        latency_ms=(time.perf_counter() - started) * 1000,
+        model_ver=R.RULE_VERSION,
+    )
+    return result, keywords
+
+
+def strongest_per_rule(hits: list[Hit]) -> dict[str, Hit]:
+    """같은 규칙 id 가 여러 번 걸려도 가장 높은 점수 하나만 남긴다.
+    같은 문구를 여러 번 적어 점수를 부풀리는 것을 막는다."""
+    best: dict[str, Hit] = {}
+    for h in hits:
+        if h.rule not in best or h.weight > best[h.rule].weight:
+            best[h.rule] = h
+    return best
+
+
+def combine(hits) -> float:
+    """하나라도 맞으면 위험: 1 - ∏(1 - w)"""
+    safe = 1.0
+    for h in hits:
+        safe *= 1 - h.weight
+    return 1 - safe
+
+
+def _reason(best: dict[str, Hit]) -> str:
+    out = ""
+    for rule in sorted(best):
+        nxt = f"{out}, {rule}" if out else rule
+        if len(nxt) > R.REASON_MAX:
+            break
+        out = nxt
+    return out
+
+
+# ── 규칙 1: 전처리 신호 ──
+
+
+def signal_hits(chunk: Chunk) -> list[Hit]:
+    log = chunk.transform_log
+    per_k = 1000 / max(len(chunk.raw_text), 1)
+    out: list[Hit] = []
+
+    def add(rule: tuple[str, float], span: Span | None) -> None:
+        out.append(Hit(rule[0], rule[1], None, span))
+
+    if log.tag_chars_decoded >= 1:
+        add(R.SIG_TAG, _first_segment(chunk, "unicode_tag"))
+    zw_rate = log.zero_width_removed * per_k
+    if zw_rate >= R.ZW_PER_K and log.zero_width_removed >= R.ZW_MIN:
+        add(R.SIG_ZW, _first_span(chunk, "zero_width_removed"))
+    elif zw_rate >= R.ZW_LOW_PER_K:
+        add(R.SIG_ZW_LOW, _first_span(chunk, "zero_width_removed"))
+    if log.hangul_filler_removed >= 1:
+        add(R.SIG_FILLER, _first_span(chunk, "hangul_filler_removed"))
+    if log.homoglyph_replaced >= R.HOMO_MIN:
+        add(R.SIG_HOMO, _first_span(chunk, "homoglyph_replaced"))
+    if log.jamo_assembled >= R.JAMO_MIN:
+        add(R.SIG_JAMO, _first_span(chunk, "jamo_assembled"))
+    if log.variation_selector_removed >= R.VS_MIN:
+        add(R.SIG_VS, _first_span(chunk, "variation_selector_removed"))
+    # 아랍어·히브리어 문서에는 방향 제어문자가 정상으로 있다
+    if log.bidi_removed >= 1 and not R.RTL_SCRIPT.search(chunk.text):
+        add(R.SIG_BIDI, _first_span(chunk, "bidi_removed"))
+    styled = R.STYLED_CHARS.findall(chunk.raw_text)
+    if len(styled) >= R.STYLED_MIN:
+        add(R.SIG_STYLED, None)
+    if len(R.NFD_JAMO.findall(chunk.raw_text)) >= R.NFD_MIN:
+        add(R.SIG_NFD, None)
+    for ts in chunk.transform_spans:
+        if ts.kind != "hidden_text_found":
+            continue
+        if ts.note in R.DELIBERATE:
+            add(R.SIG_HIDE, ts.span)
+            hidden = _plain(chunk.raw_text[ts.span.start : ts.span.end])
+            # 숨긴 FAQ 답("~하세요", "You should ~")은 정상 웹에도 흔하다. AI 를 지목할 때만 센다
+            if _is_sentence(hidden) and R.AI_ADDRESS.search(hidden):
+                add(R.SIG_HIDE_TEXT, ts.span)
+        elif ts.note in R.COMMENTS:
+            add(R.SIG_COMMENT, ts.span)
+            # 개발자 주석("수정하지 마세요")도 지시문이라, 점수를 낮게 두고 2차에 맡긴다
+            hidden = _plain(chunk.raw_text[ts.span.start : ts.span.end])
+            directive = R.IMPERATIVE.search(hidden) or R.AI_ADDRESS.search(hidden)
+            if _is_sentence(hidden) and (directive or R.SECOND_PERSON.search(hidden)):
+                add(R.SIG_COMMENT_TEXT, ts.span)
+        elif ts.note in R.EXFIL:
+            if R.EXFIL_PLACEHOLDER.search(chunk.raw_text[ts.span.start : ts.span.end]):
+                add(R.SIG_EXFIL, ts.span)
+    out += decoded_hits(chunk)
+    return out
+
+
+def decoded_hits(chunk: Chunk) -> list[Hit]:
+    """복원해야만 보이는 문장이 있으면 신호. 키·해시·JSON·주소는 정상 문서에도 흔해서 뺀다.
+    html_entity·unicode_escape 는 줄 전체를 풀어서 보이는 글도 섞이므로,
+    본문(text)에 없던 단어만 센다 (이 방식은 모든 복원 방법에 똑같이 쓴다)"""
+    out: list[Hit] = []
+    seen: set[str] | None = None
+    for seg in chunk.decoded_segments:
+        if seg.method == "unicode_tag":  # SIG-TAG 가 따로 있다
+            continue
+        if seen is None:
+            seen = set(R.WORD.findall(chunk.text))
+        if not _hidden_sentence(seg.decoded, seen):
+            continue
+        half = _example_context(chunk.raw_text, seg.span.start, seg.span.end)
+        nested = seg.depth >= 2
+        rules = (R.SIG_DECODED_TEXT, R.SIG_DECODED_NESTED) if nested else (R.SIG_DECODED_TEXT,)
+        for rule in rules:
+            out.append(Hit(rule[0], rule[1] / 2 if half else rule[1], None, seg.span))
+    return out
+
+
+def _hidden_sentence(decoded: str, seen: set[str]) -> bool:
+    if sum(c.isspace() for c in decoded) < R.PROSE_MIN_SPACES:
+        return False
+    if R.JSON_LIKE.match(decoded):
+        return False
+    url_chars = sum(len(m) for m in R.URL_TOKEN.findall(decoded))
+    if url_chars > R.URL_MAX_SHARE * len(decoded):
+        return False
+    new_words = [w for w in R.WORD.findall(decoded) if w not in seen]
+    return len(new_words) >= R.PROSE_MIN_WORDS
+
+
+_TAG = re.compile(r"<[^<>]{0,500}>")
+
+
+def _plain(raw: str) -> str:
+    return _TAG.sub(" ", raw)
+
+
+def _is_sentence(s: str) -> bool:
+    """단어가 여럿이고 문자 비율이 높은 글"""
+    if len(R.WORD.findall(s)) < R.PROSE_MIN_WORDS:
+        return False
+    chars = [c for c in s if not c.isspace()]
+    letters = sum(c.isalpha() for c in chars)
+    return letters >= R.PROSE_MIN_LETTERS * max(len(chars), 1)
+
+
+def _example_context(raw: str, start: int, end: int) -> bool:
+    """인코딩 문자열이 따옴표·코드 블록 안이거나 예시 표시 근처인가 (보안 교육 글의 예시)"""
+    return raw[:start].count(R.CODE_FENCE) % 2 == 1 or _quoted(raw, start, end)
+
+
+def _first_span(chunk: Chunk, kind: str) -> Span | None:
+    return next((t.span for t in chunk.transform_spans if t.kind == kind), None)
+
+
+def _first_segment(chunk: Chunk, method: str) -> Span | None:
+    return next((s.span for s in chunk.decoded_segments if s.method == method), None)
+
+
+# ── 규칙 2: 키워드·패턴 ──
+
+
+def keyword_hits(chunk: Chunk) -> list[Hit]:
+    hidden = [
+        ts.span
+        for ts in chunk.transform_spans
+        if ts.kind == "hidden_text_found" and ts.note in R.DELIBERATE | R.COMMENTS
+    ]
+    out: list[Hit] = []
+    for rule in R.KEYWORD_RULES:
+        for m in rule.pattern.finditer(chunk.text):
+            span = chunk.raw_span(m.start(), m.end())
+            if _overlaps(span, hidden):
+                out.append(Hit(rule.id + "+hidden", R.STRONG, rule.attack_type, span))
+            else:
+                weight = rule.weight / 2 if _quoted(chunk.text, m.start(), m.end()) else rule.weight
+                out.append(Hit(rule.id, weight, rule.attack_type, span))
+        for seg in chunk.decoded_segments:
+            m = rule.pattern.search(seg.decoded)
+            # html_entity·unicode_escape 는 줄 전체를 풀어서 평범한 글도 들어 있다.
+            # 본문에 그대로 있는 문구는 숨긴 게 아니므로 본문 규칙에 맡긴다
+            if m and m.group() not in chunk.text:
+                # 결정 ⑨: 보안 교육 글의 인코딩 예시는 점수 절반 (본문 인용문과 같은 규칙)
+                half = _example_context(chunk.raw_text, seg.span.start, seg.span.end)
+                weight = R.STRONG / 2 if half else R.STRONG
+                out.append(Hit(rule.id + "+decoded", weight, rule.attack_type, seg.span))
+    out += skeleton_hits(chunk, {h.rule.split("+")[0] for h in out})
+    return out
+
+
+def _overlaps(span: Span, spans: list[Span]) -> bool:
+    return any(span.start < s.end and s.start < span.end for s in spans)
+
+
+def _quoted(text: str, start: int, end: int) -> bool:
+    """공격 문구가 따옴표 안이거나 근처에 예시 표시가 있나 (인용한 정상 글이면 점수를 절반으로)"""
+    before = text[max(0, start - R.QUOTE_WINDOW) : start]
+    after = text[end : end + R.QUOTE_WINDOW]
+    if R.EXAMPLE_MARK.search(before) or R.EXAMPLE_MARK.search(after):
+        return True
+    before = before.rsplit("\n", 1)[-1]
+    after = after.split("\n", 1)[0]
+    # 영어 축약형(don't)의 ' 를 따옴표로 보지 않도록 단어 경계에 있는 따옴표만 센다
+    opened = any(
+        c in R.QUOTE_OPEN and (k == 0 or not before[k - 1].isalnum()) for k, c in enumerate(before)
+    )
+    closed = any(
+        c in R.QUOTE_CLOSE and (k + 1 == len(after) or not after[k + 1].isalnum())
+        for k, c in enumerate(after)
+    )
+    return opened and closed
+
+
+# ── 골격 보기 ──
+
+_SKELETON_RUN = re.compile(r"[^\W_]+|[@$]+")
+
+
+def skeleton(text: str) -> tuple[str, list[int]]:
+    """casefold → 공백·구두점 제거 → 리트 치환. 글자마다 text 위치를 함께 돌려준다.
+    모델 입력에는 절대 쓰지 않는다 (preprocess/quote.py 의 _compress 와 같은 방식)"""
+    parts: list[str] = []
+    index: list[int] = []
+    for m in _SKELETON_RUN.finditer(text):
+        run = m.group().casefold().translate(R.LEET)
+        if len(run) == m.end() - m.start():
+            parts.append(run)
+            index.extend(range(m.start(), m.end()))
+            continue
+        # casefold 로 글자 수가 바뀌는 경우(ß → ss 등)만 한 글자씩
+        for i in range(m.start(), m.end()):
+            for f in text[i].casefold().translate(R.LEET):
+                parts.append(f)
+                index.append(i)
+    return "".join(parts), index
+
+
+def skeleton_hits(chunk: Chunk, found: set[str]) -> list[Hit]:
+    """본문·복원 결과에서 이미 걸린 규칙은 건너뛴다 (골격 보기에서만 찾은 경우만 점수)"""
+    rules = [r for r in R.SKELETON_RULES if r.id not in found]
+    if not rules:
+        return []
+    skel, index = skeleton(chunk.text)
+    out: list[Hit] = []
+    for rule in rules:
+        m = rule.pattern.search(skel)
+        if m:
+            span = chunk.raw_span(index[m.start()], index[m.end() - 1] + 1)
+            out.append(Hit(rule.id + "+skeleton", rule.weight, rule.attack_type, span))
+    return out

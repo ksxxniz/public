@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS inspection_log (
   model_ver       TEXT,
   policy          TEXT,              -- 어떤 정책으로 돌렸나
   defense_enabled INTEGER DEFAULT 1, -- RAG 데모 ON/OFF 비교용
+  pipeline_ver    TEXT,              -- (0.3.0, ⑦) 판정을 만든 파이프라인 구성
+  fallback        INTEGER DEFAULT 0, -- (0.3.0, ⑥) 장애 처리로 나온 줄. 지연 그래프에서 뺀다
+  cache_hit       INTEGER DEFAULT 0, -- (0.3.0, ⑦) 저장된 판정 재사용. 지연 그래프에서 뺀다
   created_at      TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -65,6 +68,9 @@ class LogRow(BaseModel):
     model_ver: str | None = None
     policy: str | None = None
     defense_enabled: bool = True
+    pipeline_ver: str | None = None
+    fallback: bool = False
+    cache_hit: bool = False
 
 
 _COLUMNS = list(LogRow.model_fields)
@@ -82,7 +88,22 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """0.2.x 때 만든 DB 에 0.3.0 칸을 더한다. 이미 있으면 아무것도 안 한다"""
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(inspection_log)")}
+    adds = {
+        "pipeline_ver": "TEXT",
+        "fallback": "INTEGER DEFAULT 0",
+        "cache_hit": "INTEGER DEFAULT 0",
+    }
+    with conn:
+        for col, decl in adds.items():
+            if col not in have:
+                conn.execute(f"ALTER TABLE inspection_log ADD COLUMN {col} {decl}")
 
 
 def insert_rows(conn: sqlite3.Connection, rows: Iterable[LogRow]) -> int:
@@ -111,6 +132,8 @@ def log_verdict(
         "chunk_id": verdict.chunk_id,
         "policy": policy,
         "defense_enabled": defense_enabled,
+        "pipeline_ver": verdict.pipeline_ver or None,
+        "cache_hit": verdict.cache_hit,
     }
     rows = []
     if "preprocess" in verdict.path:
@@ -136,10 +159,13 @@ def log_verdict(
                 evidence_end=r.evidence_span.end if r.evidence_span else None,
                 latency_ms=r.latency_ms,
                 model_ver=r.model_ver,
+                fallback=r.fallback,
             )
         )
     if rows:
-        rows[-1] = rows[-1].model_copy(update={"action": verdict.action})
+        rows[-1] = rows[-1].model_copy(
+            update={"action": verdict.action, "fallback": verdict.fallback}
+        )
     return insert_rows(conn, rows)
 
 
