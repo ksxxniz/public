@@ -12,7 +12,7 @@ docs/decisions.md 에 남긴다.
 import re
 from dataclasses import dataclass
 
-RULE_VERSION = "rule-0.2"
+RULE_VERSION = "rule-0.3"
 
 INJECTION_AT = 0.7  # risk_score 가 이 값 이상이면 label="injection"
 STRONG = 0.9  # 숨김 구간·복원 결과 안에서 찾은 공격 문구
@@ -33,9 +33,31 @@ SIG_BIDI = ("SIG-BIDI", 0.5)  # bidi_removed >= 1 이고 text 에 아랍·히브
 SIG_HIDE = ("SIG-HIDE", 0.5)  # 숨김 이유가 DELIBERATE
 SIG_COMMENT = ("SIG-COMMENT", 0.3)  # 숨김 이유가 COMMENTS
 
+# rule-0.3: 문장 내용이 아니라 "숨긴 방식"으로 잡는 신호.
+# 공격 문장은 얼마든지 바꿀 수 있지만, 숨기는 방법은 몇 가지뿐이라 처음 보는 문장에도 통한다.
+SIG_EXFIL = ("SIG-EXFIL", 0.6)  # 전처리가 exfil_image 로 표시한 외부 이미지 주소
+SIG_DECODED_TEXT = ("SIG-DECODED-TEXT", 0.6)  # 복원 결과가 사람이 읽는 문장
+SIG_DECODED_NESTED = ("SIG-DECODED-NESTED", 0.6)  # 두 겹 이상 인코딩한 문장
+SIG_HIDE_TEXT = (
+    "SIG-HIDE-TEXT",
+    0.7,
+)  # 일부러 숨긴 구간 안에서 AI 를 지목 (SIG-HIDE 와 합치면 0.85)
+SIG_COMMENT_TEXT = (
+    "SIG-COMMENT-TEXT",
+    0.4,
+)  # 주석 안의 지시문 (개발자 주석도 있어 2차로 넘기기까지만)
+SIG_STYLED = ("SIG-STYLED", 0.5)  # 전각·수학 글꼴·작은 대문자로 쓴 라틴 글자
+SIG_NFD = ("SIG-NFD", 0.4)  # 풀어 쓴 한글 자모(NFD). 맥 파일명 등 정상도 있어 낮게
+
+# 기준값: 새 데이터셋 학습 몫 정상 청크 3,822개의 분포로 정했다 (2026-11-19).
+# 정상에서 제로폭은 7청크(최대 19/1000자, 1~2개), 홈글리프는 최대 2개, 자모 조립 0,
+# 꾸민 글자는 3청크, NFD 자모는 최대 1개였다.
 ZW_PER_K = 3.0
+ZW_MIN = 3  # 짧은 청크에서 1~2개만 있어도 비율이 커지는 것을 막는다
 ZW_LOW_PER_K = 1.0
-HOMO_MIN = 2
+HOMO_MIN = 3
+STYLED_MIN = 10
+NFD_MIN = 10
 JAMO_MIN = 2
 VS_MIN = 3
 
@@ -61,6 +83,48 @@ DELIBERATE = frozenset(
     }
 )
 COMMENTS = frozenset({"comment", "cdata", "md_comment"})
+EXFIL = frozenset({"exfil_image"})
+# 전처리의 exfil_image 는 README 배지·아바타처럼 쿼리가 긴 정상 이미지도 표시한다
+# (학습 몫 정상 66건).
+# 그래서 주소에 자리표시자({…}·{{…}}·%7B…·$변수)가 있을 때만 신호로 쓴다
+EXFIL_PLACEHOLDER = re.compile(r"\{[^{}\s]{1,40}\}|%7[Bb]|\$\{?[A-Za-z_]\w{1,30}")
+
+# 전각 라틴·숫자, 수학 글꼴 영숫자, 작은 대문자.
+# 정리본에서는 NFKC 로 보통 글자가 되므로 원문에서 센다
+STYLED_CHARS = re.compile(
+    r"[\uff10-\uff19\uff21-\uff3a\uff41-\uff5a\U0001d400-\U0001d7ff\u1d00-\u1d2b]"
+)
+NFD_JAMO = re.compile(r"[\u1100-\u11ff]")
+
+# ── 숨긴 글이 "문장"인가, "지시"인가 ──
+# 특정 공격 문장을 외우지 않도록 문법 수준의 넓은 표현만 쓴다.
+WORD = re.compile(r"[^\W\d_]{2,}")
+PROSE_MIN_WORDS = 5
+PROSE_MIN_LETTERS = 0.7  # 공백 뺀 글자 중 문자 비율 (키·해시·JSON 은 낮다)
+PROSE_MIN_SPACES = 3  # 띄어쓰기 없는 식별자(if_pyvar_if…)를 문장으로 보지 않게
+URL_TOKEN = re.compile(r"\S*(?:://|www\.|\]\(|data:)\S*")
+URL_MAX_SHARE = 0.5  # 복원 결과의 절반 이상이 주소면 문장으로 보지 않는다
+JSON_LIKE = re.compile(r"^\s*[\[{].{0,200}[\"']\s*:", re.S)
+# 2인칭으로 말을 거는 표현 (주석 안 지시문 판단용)
+SECOND_PERSON = re.compile(r"\b(?:you|your|yourself)\b|너는|너의|네가|당신은|당신의|귀하", re.I)
+# AI·자동 처리기를 지목하는 말
+AI_ADDRESS = re.compile(
+    r"\b(?:AI|LLM|GPT|chat\s*bot|chatbot|assistant|language\s+model|the\s+model)\b"
+    r"|에이아이|인공\s*지능|어시스턴트|챗봇|언어\s*모델|(?:자동|AI)\w{0,4}\s*(?:요약|처리|응답|답변)",
+    re.I,
+)
+# 지시문. 특정 공격 문장이 아니라 "누군가에게 무엇을 시키는" 문법 형태만 본다.
+# 한국어: 명령·청유·의무·금지 어미 (서술형 "~한다"는 설명문에 흔해서 뺀다)
+# 영어: 2인칭 의무 표현, 문장 맨 앞의 지시 동사, "the following" 류
+IMPERATIVE = re.compile(
+    r"(?:하라|하시오|하십시오|해라|해\s*줘|해\s*주세요|하세요|하자|보자|할\s*것|볼\s*것|말\s*것"
+    r"|마라|마세요|말라|해야\s*(?:한다|합니다|해)|(?:서는|면)\s*안\s*(?:된다|됩니다|돼))\s*[.!]?(?:\s|$)"
+    r"|\b(?:you|your)\b.{0,40}?\b(?:must|should|need\s+to|have\s+to|are\s+to|will\s+now|can\s+now)\b"
+    r"|(?:^|[.!?:]\s+)(?:ignore|disregard|forget|respond|reply|answer|output|include|reveal|send|show"
+    r"|tell|print|list|run|execute|delete|write|act|behave|pretend|follow|always|never|do\s+not|don't)\b"
+    r"|\bthe\s+following\s+(?:command|instructions?|steps?)\b|\bdo\s+the\s+following\b",
+    re.I | re.M,
+)
 
 
 # ── 규칙 2: 키워드·패턴 ──
@@ -300,6 +364,7 @@ SKELETON_RULES: tuple[KeywordRule, ...] = (
 QUOTE_WINDOW = 40
 QUOTE_OPEN = "\"'`“‘「『«"
 QUOTE_CLOSE = "\"'`”’」』»"
+CODE_FENCE = "```"  # 코드 블록 안의 인코딩 문자열은 예시로 본다 (복원 결과 점수 절반)
 EXAMPLE_MARK = re.compile(
     r"예\s*[:：)]|예시|예를\s*들|의\s*예|example|e\.g\.|for\s+instance|such\s+as", _I
 )
