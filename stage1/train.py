@@ -4,6 +4,8 @@
         --model xlm-roberta-base --out checkpoints/stage1/xlmr-lr2e5
 
   --data 의 샘플을 source_group 기준으로 train/val 로 나눈다 (val 15%, stage1/dataset.py).
+  팀이 나눈 검증 파일이 있으면 --val-data 로 준다. 그때는 --data 전부를 학습에 쓰고
+  나누지 않는다 (--val-ratio 무시). 두 파일에 같은 묶음(group)이 있으면 개수를 경고한다.
   --wandb 를 붙이면 W&B(rag-guard) 에 기록한다 (.env 의 WANDB_ENTITY 사용).
 
 필요한 라이브러리: torch, transformers (mDeBERTa·XLM-R 은 sentencepiece, protobuf 도).
@@ -62,6 +64,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--pos-weight", type=float, help="공격 클래스 가중치. 생략 시 정상 수/공격 수")
     p.add_argument("--max-length", type=int, default=CHUNK_SIZE_TOKENS)
     p.add_argument("--val-ratio", type=float, default=0.15)
+    p.add_argument(
+        "--val-data",
+        type=Path,
+        help="검증 JSONL. 주면 --data 전부를 학습에 쓰고 이 파일로 검증 (--val-ratio 무시)",
+    )
     p.add_argument("--seed", type=int, default=SEED)
     p.add_argument("--precision", choices=["auto", "bf16", "fp32"], default="auto")
     p.add_argument("--wandb", action="store_true", help="W&B 에 기록")
@@ -82,20 +89,16 @@ def main(argv: list[str] | None = None) -> dict:
         get_linear_schedule_with_warmup,
     )
 
-    examples = load_jsonl(args.data)
-    decoded_stats: dict = {}
-    if not args.no_decoded:
-        examples, decoded_stats = add_decoded(examples)
-        print(
-            f"복원 결과 조각: injection {decoded_stats['decoded_injection']}개, "
-            f"benign {decoded_stats['decoded_benign']}개"
-        )
-        if decoded_stats["skipped_no_answer"]:
-            print(
-                f"경고: answer 가 없는 공격 샘플 {decoded_stats['skipped_no_answer']}개는 "
-                "복원 결과 조각을 만들지 않았습니다"
-            )
-    train, val = split_examples(examples, args.val_ratio, args.seed)
+    examples, decoded_stats = load_examples(args.data, args.no_decoded, "train")
+    if args.val_data:
+        train = examples
+        val, val_stats = load_examples(args.val_data, args.no_decoded, "val")
+        decoded_stats = {**decoded_stats, **{f"val_{k}": v for k, v in val_stats.items()}}
+        shared = {ex.group for ex in train} & {ex.group for ex in val}
+        if shared:
+            print(f"경고: train 과 val 에 같은 묶음(group)이 {len(shared)}개 있습니다 (누수)")
+    else:
+        train, val = split_examples(examples, args.val_ratio, args.seed)
     if not train or not val:
         raise SystemExit(f"데이터가 부족합니다: train {len(train)}개, val {len(val)}개")
     counts = label_counts(train)
@@ -187,6 +190,24 @@ def predict(model, batches, torch) -> list[float]:
     return scores
 
 
+def load_examples(path: Path, no_decoded: bool, name: str) -> tuple[list[Example], dict]:
+    """JSONL 을 읽고 (결정 ⑥) 복원 결과 조각을 붙인다. 개수 통계도 함께 돌려준다"""
+    examples = load_jsonl(path)
+    if no_decoded:
+        return examples, {}
+    examples, stats = add_decoded(examples)
+    print(
+        f"[{name}] 복원 결과 조각: injection {stats['decoded_injection']}개, "
+        f"benign {stats['decoded_benign']}개"
+    )
+    if stats["skipped_no_answer"]:
+        print(
+            f"경고: [{name}] answer 가 없는 공격 샘플 {stats['skipped_no_answer']}개는 "
+            "복원 결과 조각을 만들지 않았습니다"
+        )
+    return examples, stats
+
+
 def evaluate(data: list[Example], scores: list[float]) -> dict:
     """문서 단위 지표 (본문·복원 조각 중 최고 점수로 판정) + 샘플 단위 지표 (sample_ 접두)"""
     sample = binary_metrics([ex.label_id for ex in data], scores)
@@ -242,6 +263,7 @@ def save(model, tokenizer, args, metrics, epoch, pos_weight, train, val, decoded
         "decoded": not args.no_decoded,
         "data": {
             "path": str(args.data),
+            "val_path": str(args.val_data) if args.val_data else None,
             "n_train": len(train),
             "n_val": len(val),
             "train_kinds": kind_counts(train),
